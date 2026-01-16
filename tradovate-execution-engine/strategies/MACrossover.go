@@ -19,12 +19,17 @@ type MACrossover struct {
 }
 
 // NewMACrossover creates a new MA crossover strategy with 5 and 15 period SMAs
-func NewMACrossover(mode indicators.UpdateMode) *MACrossover {
+func NewMACrossover(sma1Len, sma2Len int, mode indicators.UpdateMode) *MACrossover {
 	return &MACrossover{
-		fastSMA:  indicators.NewSMA(5, mode),
-		slowSMA:  indicators.NewSMA(15, mode),
+		fastSMA:  indicators.NewSMA(sma1Len, mode),
+		slowSMA:  indicators.NewSMA(sma2Len, mode),
 		position: Flat,
 	}
+}
+
+// NewDefaultMACrossover creates a new MA crossover strategy with default settings 5 and 15
+func NewDefaultMACrossover(mode indicators.UpdateMode) *MACrossover {
+	return NewMACrossover(5, 15, mode)
 }
 
 // Update processes a new price and returns the signal

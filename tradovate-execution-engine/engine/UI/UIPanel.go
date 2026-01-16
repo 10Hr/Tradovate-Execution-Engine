@@ -6,6 +6,7 @@ import (
 	"time"
 	"tradovate-execution-engine/engine/config"
 	"tradovate-execution-engine/engine/internal/auth"
+	"tradovate-execution-engine/engine/internal/execution"
 	"tradovate-execution-engine/engine/internal/logger"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -52,6 +53,9 @@ var (
 	menuItemStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("39")).
 			Bold(true)
+
+	disabledStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240"))
 )
 
 type Tab int
@@ -150,9 +154,12 @@ type model struct {
 	// Config
 	configPath   string
 	strategyName string
+
+	// Order Manager
+	orderManager *execution.OrderManager
 }
 
-func InitialModel(mainLog, orderLog *logger.Logger) model {
+func InitialModel(mainLog, orderLog *logger.Logger, om *execution.OrderManager) model {
 	// Use provided loggers or create defaults
 	if mainLog == nil {
 		mainLog = logger.NewLogger(500)
@@ -176,6 +183,7 @@ func InitialModel(mainLog, orderLog *logger.Logger) model {
 		totalPnL:     1234.56,
 		mainLogger:   mainLog,
 		orderLogger:  orderLog,
+		orderManager: om,
 		configPath:   "/config/trading.yml",
 		strategyName: "No strategy selected",
 
@@ -201,8 +209,8 @@ func InitialModel(mainLog, orderLog *logger.Logger) model {
 			{Time: time.Now().Add(-5 * time.Minute), PnL: 1234.56},
 		},
 		commands: []Command{
-			{Name: "buy", Description: "Place a buy order", Usage: ":buy <symbol> @<price> qty:<quantity>", Category: "Trading"},
-			{Name: "sell", Description: "Place a sell order", Usage: ":sell <symbol> @<price> qty:<quantity>", Category: "Trading"},
+			{Name: "buy", Description: "Place a buy order", Usage: ":buy <symbol> qty:<quantity>", Category: "Trading"},
+			{Name: "sell", Description: "Place a sell order", Usage: ":sell <symbol> qty:<quantity>", Category: "Trading"},
 			{Name: "cancel", Description: "Cancel an order", Usage: ":cancel <orderID>", Category: "Trading"},
 			{Name: "flatten", Description: "Flatten all positions", Usage: ":flatten", Category: "Trading"},
 			{Name: "mode", Description: "Switch trading mode (live/visual)", Usage: ":mode <live|visual>", Category: "System"},
@@ -374,11 +382,17 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "@": // Shift+2
+		if !m.connected {
+			return m, nil
+		}
 		m.mainLogger.Println(">>> REQUESTING MARKET DATA... <<<")
 		m.logScrollOffset = 1000000
 		// TODO: Trigger MD subscription
 
 	case "#": // Shift+3
+		if !m.connected {
+			return m, nil
+		}
 		m.mode = modeCommand
 		m.commandInput = ":strategy "
 		m.statusMsg = "Enter strategy name..."
@@ -408,12 +422,16 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.activeTab == TabMain {
 			// Calculate max scroll for Main Log to clamp "infinity"
 			availableLines := m.height - 11
-			if availableLines < 1 { availableLines = 1 }
-			
+			if availableLines < 1 {
+				availableLines = 1
+			}
+
 			entriesLen := m.mainLogger.Count()
 			maxScroll := entriesLen - availableLines
-			if maxScroll < 0 { maxScroll = 0 }
-			
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+
 			// Clamp if we are past the bottom (e.g. from auto-scroll)
 			if m.logScrollOffset > maxScroll {
 				m.logScrollOffset = maxScroll
@@ -422,16 +440,20 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.logScrollOffset > 0 {
 				m.logScrollOffset--
 			}
-			
+
 		} else if m.activeTab == TabOrderManagement {
 			// Calculate max scroll for Order Log
 			availableLines := m.height - 11
-			if availableLines < 1 { availableLines = 1 }
-			
+			if availableLines < 1 {
+				availableLines = 1
+			}
+
 			entriesLen := m.orderLogger.Count()
 			maxScroll := entriesLen - availableLines
-			if maxScroll < 0 { maxScroll = 0 }
-			
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+
 			// Clamp
 			if m.orderLogScrollOffset > maxScroll {
 				m.orderLogScrollOffset = maxScroll
@@ -440,7 +462,7 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.orderLogScrollOffset > 0 {
 				m.orderLogScrollOffset--
 			}
-			
+
 		} else {
 			if m.scrollOffset > 0 {
 				m.scrollOffset--
@@ -452,25 +474,33 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.activeTab == TabMain {
 			// Calculate max scroll for Main Log
 			availableLines := m.height - 11
-			if availableLines < 1 { availableLines = 1 }
-			
+			if availableLines < 1 {
+				availableLines = 1
+			}
+
 			entriesLen := m.mainLogger.Count()
 			maxScroll := entriesLen - availableLines
-			if maxScroll < 0 { maxScroll = 0 }
-			
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+
 			if m.logScrollOffset < maxScroll {
 				m.logScrollOffset++
 			}
-			
+
 		} else if m.activeTab == TabOrderManagement {
 			// Calculate max scroll for Order Log
 			availableLines := m.height - 11
-			if availableLines < 1 { availableLines = 1 }
-			
+			if availableLines < 1 {
+				availableLines = 1
+			}
+
 			entriesLen := m.orderLogger.Count()
 			maxScroll := entriesLen - availableLines
-			if maxScroll < 0 { maxScroll = 0 }
-			
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+
 			if m.orderLogScrollOffset < maxScroll {
 				m.orderLogScrollOffset++
 			}
@@ -502,24 +532,32 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Go to bottom (Shift+S)
 		if m.activeTab == TabMain {
 			availableLines := m.height - 11
-			if availableLines < 1 { availableLines = 1 }
-			
+			if availableLines < 1 {
+				availableLines = 1
+			}
+
 			entriesLen := m.mainLogger.Count()
 			maxScroll := entriesLen - availableLines
-			if maxScroll < 0 { maxScroll = 0 }
-			
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+
 			m.logScrollOffset = maxScroll
-			
+
 		} else if m.activeTab == TabOrderManagement {
 			availableLines := m.height - 11
-			if availableLines < 1 { availableLines = 1 }
-			
+			if availableLines < 1 {
+				availableLines = 1
+			}
+
 			entriesLen := m.orderLogger.Count()
 			maxScroll := entriesLen - availableLines
-			if maxScroll < 0 { maxScroll = 0 }
-			
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+
 			m.orderLogScrollOffset = maxScroll
-			
+
 		} else {
 			contentHeight := m.height - 5
 			fullContent := m.renderCommandsContent()
@@ -612,21 +650,63 @@ func (m model) executeCommand() (model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "buy", "sell":
+		if !m.connected {
+			m.errorMsg = "Must be connected to API to trade"
+			return m, nil
+		}
 		if m.tradingMode != ModeLive {
 			m.errorMsg = "Cannot place orders in Visual mode. Switch to Live mode with :mode live"
 			m.mainLogger.Errorf("Order rejected: Not in Live mode")
 			return m, nil
 		}
-		if len(parts) < 2 {
-			m.errorMsg = "Usage: :buy <symbol> @<price> qty:<quantity>"
+		if len(parts) < 3 {
+			m.errorMsg = "Usage: :" + parts[0] + " <symbol> qty:<quantity>"
 			return m, nil
 		}
+
 		symbol := parts[1]
-		m.statusMsg = successStyle.Render(fmt.Sprintf("✓ %s order placed for %s", strings.ToUpper(parts[0]), symbol))
-		m.mainLogger.Printf("%s order placed for %s", strings.ToUpper(parts[0]), symbol)
-		m.orderLogger.Printf("%s %s - Price: Market, Qty: 1", strings.ToUpper(parts[0]), symbol)
+		qtyStr := parts[2]
+		
+		if !strings.HasPrefix(qtyStr, "qty:") {
+			m.errorMsg = "Usage: :" + parts[0] + " <symbol> qty:<quantity>"
+			return m, nil
+		}
+		
+		var qty int
+		if _, err := fmt.Sscanf(qtyStr, "qty:%d", &qty); err != nil {
+			m.errorMsg = "Invalid quantity format. Use qty:<number>"
+			return m, nil
+		}
+
+		if m.orderManager == nil {
+			m.errorMsg = "Order Manager not initialized"
+			m.mainLogger.Error("Order Manager not initialized")
+			return m, nil
+		}
+
+		side := execution.SideBuy
+		if parts[0] == "sell" {
+			side = execution.SideSell
+		}
+
+		m.mainLogger.Printf("Submitting %s order for %d %s...", strings.ToUpper(parts[0]), qty, symbol)
+		
+		order, err := m.orderManager.SubmitMarketOrder(symbol, side, qty)
+		if err != nil {
+			m.errorMsg = "Order failed: " + err.Error()
+			m.mainLogger.Errorf("Order failed: %v", err)
+			return m, nil
+		}
+
+		m.statusMsg = successStyle.Render(fmt.Sprintf("✓ %s order placed for %s (ID: %s)", strings.ToUpper(parts[0]), symbol, order.ID))
+		m.mainLogger.Printf("%s order placed for %s (ID: %s)", strings.ToUpper(parts[0]), symbol, order.ID)
+		m.orderLogger.Printf("%s %s - Price: Market, Qty: %d, ID: %s", strings.ToUpper(parts[0]), symbol, qty, order.ID)
 
 	case "cancel":
+		if !m.connected {
+			m.errorMsg = "Must be connected to API to cancel orders"
+			return m, nil
+		}
 		if m.tradingMode != ModeLive {
 			m.errorMsg = "Cannot cancel orders in Visual mode"
 			m.mainLogger.Errorf("Cancel rejected: Not in Live mode")
@@ -642,6 +722,10 @@ func (m model) executeCommand() (model, tea.Cmd) {
 		m.orderLogger.Printf("CANCEL %s", orderID)
 
 	case "flatten":
+		if !m.connected {
+			m.errorMsg = "Must be connected to API to flatten positions"
+			return m, nil
+		}
 		if m.tradingMode != ModeLive {
 			m.errorMsg = "Cannot flatten in Visual mode"
 			m.mainLogger.Errorf("Flatten rejected: Not in Live mode")
@@ -674,6 +758,10 @@ func (m model) executeCommand() (model, tea.Cmd) {
 		m.mainLogger.Printf("Config file: %s", m.configPath)
 
 	case "strategy":
+		if !m.connected {
+			m.errorMsg = "Must be connected to API to select strategy"
+			return m, nil
+		}
 		if len(parts) < 2 {
 			m.errorMsg = "Usage: :strategy <name>"
 			return m, nil
@@ -872,9 +960,31 @@ func (m model) renderMainHub(contentHeight int) string {
 			leftPanel.WriteString("\n")
 			continue
 		}
+
+		// Check if command should be enabled
+		enabled := true
+		if !m.connected {
+			// Only allow specific commands when disconnected
+			// !, $, %, ^ are allowed
+			switch item.key {
+			case "!", "$", "%", "^":
+				enabled = true
+			default:
+				enabled = false
+			}
+		}
+
+		keyStyle := menuItemStyle
+		descStyle := lipgloss.NewStyle()
+
+		if !enabled {
+			keyStyle = disabledStyle
+			descStyle = disabledStyle
+		}
+
 		leftPanel.WriteString(fmt.Sprintf("%s %s\n",
-			menuItemStyle.Width(3).Render("["+item.key+"]"),
-			item.desc,
+			keyStyle.Width(3).Render("["+item.key+"]"),
+			descStyle.Render(item.desc),
 		))
 	}
 
@@ -1090,11 +1200,19 @@ func (m model) renderOrderManagement(contentHeight int) string {
 
 	if m.tradingMode == ModeLive {
 		leftPanel.WriteString("\n\n═══ LIVE ACTIONS ═══\n\n")
-		leftPanel.WriteString(menuItemStyle.Render("Commands:\n"))
-		leftPanel.WriteString("  :buy <symbol>\n")
-		leftPanel.WriteString("  :sell <symbol>\n")
-		leftPanel.WriteString("  :cancel <id>\n")
-		leftPanel.WriteString("  :flatten\n")
+
+		cmdStyle := menuItemStyle
+		textStyle := lipgloss.NewStyle()
+		if !m.connected {
+			cmdStyle = disabledStyle
+			textStyle = disabledStyle
+		}
+
+		leftPanel.WriteString(cmdStyle.Render("Commands:\n"))
+		leftPanel.WriteString(textStyle.Render("  :buy <symbol>\n"))
+		leftPanel.WriteString(textStyle.Render("  :sell <symbol>\n"))
+		leftPanel.WriteString(textStyle.Render("  :cancel <id>\n"))
+		leftPanel.WriteString(textStyle.Render("  :flatten\n"))
 	}
 
 	leftContent := lipgloss.NewStyle().

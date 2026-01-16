@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"tradovate-execution-engine/engine/UI"
+	"tradovate-execution-engine/engine/config"
 	"tradovate-execution-engine/engine/internal/auth"
+	"tradovate-execution-engine/engine/internal/execution"
 	"tradovate-execution-engine/engine/internal/logger"
 	"tradovate-execution-engine/engine/internal/marketdata"
-
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 const (
@@ -21,42 +20,61 @@ const (
 // Example usage
 func main() {
 
-	// In your main.go or any other file:
-	mainLog := logger.NewLogger(500)
-	orderLog := logger.NewLogger(500)
+	// // In your main.go or any other file:
+	// mainLog := logger.NewLogger(500)
+	// orderLog := logger.NewLogger(500)
 
-	// Pass to UI:
-	p := tea.NewProgram(UI.InitialModel(mainLog, orderLog), tea.WithAltScreen())
-	//p := tea.NewProgram(UI.InitialModel(), tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		fmt.Printf("Error: %v\n", err)
-	}
+	// // Initialize Config for OrderManager
+	// execConfig := execution.DefaultConfig()
 
-	return
+	// // Initialize OrderManager
+	// orderManager := execution.NewOrderManager(symbol, execConfig, orderLog)
+
+	// // Pass to UI:
+	// p := tea.NewProgram(UI.InitialModel(mainLog, orderLog, orderManager), tea.WithAltScreen())
+	// if _, err := p.Run(); err != nil {
+	// 	fmt.Printf("Error: %v\n", err)
+	// }
+
+	//return
 	//---------------------------------------
 
 	// Get the global token manager
 	tm := auth.GetTokenManager()
 
+	cfg, err := config.LoadConfig(configFile)
+	if err != nil {
+		fmt.Printf("Error loading config: %v", err)
+		fmt.Println("Creating default config file...")
+		if err := config.CreateDefaultConfig(configFile); err != nil {
+			fmt.Printf("Error creating default config: %v", err)
+			return
+		}
+		fmt.Printf("Default config created at %s", configFile)
+		return
+	}
+	fmt.Println("Config Loaded.")
+
 	// Set credentials
-	// tm.SetCredentials(
-	// 	cfg.Tradovate.AppID,
-	// 	cfg.Tradovate.AppVersion,
-	// 	cfg.Tradovate.Chl,
-	// 	cfg.Tradovate.Cid,
-	// 	cfg.Tradovate.DeviceID,
-	// 	cfg.Tradovate.Environment,
-	// 	cfg.Tradovate.Username,
-	// 	cfg.Tradovate.Password,
-	// 	cfg.Tradovate.Sec,
-	// 	cfg.Tradovate.Enc,
-	// )
+	tm.SetCredentials(
+		cfg.Tradovate.AppID,
+		cfg.Tradovate.AppVersion,
+		cfg.Tradovate.Chl,
+		cfg.Tradovate.Cid,
+		cfg.Tradovate.DeviceID,
+		cfg.Tradovate.Environment,
+		cfg.Tradovate.Username,
+		cfg.Tradovate.Password,
+		cfg.Tradovate.Sec,
+		cfg.Tradovate.Enc,
+	)
 
 	// Authenticate
 	if err := tm.Authenticate(); err != nil {
 		fmt.Println("Authentication error:", err)
 		return
 	}
+	fmt.Println("Authentication Successful")
 
 	// Now you can use the token in other parts of your code
 	token, err := tm.GetAccessToken()
@@ -76,6 +94,19 @@ func main() {
 		return
 	}
 
+	orderLog := logger.NewLogger(500)
+	execConfig := execution.DefaultConfig()
+
+	// Initialize OrderManager
+	orderManager := execution.NewOrderManager(symbol, execConfig, orderLog)
+	order, err := orderManager.SubmitMarketOrder("MESH6", execution.SideBuy, 1)
+	if err != nil {
+		fmt.Println("Order failed: " + err.Error())
+		return
+	}
+	fmt.Printf("Order submitted: %+v\n", order)
+
+	return
 	fmt.Println("\nMarket data token aquired")
 	//fmt.Println("Token:", mdToken)
 

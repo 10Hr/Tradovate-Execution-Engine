@@ -26,6 +26,14 @@ type AuthResponse struct {
 	HasLive        bool      `json:"hasLive"`
 }
 
+// Account represents a Tradovate account
+type Account struct {
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	AccountType string `json:"accountType"`
+	Active      bool   `json:"active"`
+}
+
 // TokenManager manages authentication tokens for Tradovate API
 type TokenManager struct {
 	mu             sync.RWMutex
@@ -33,6 +41,7 @@ type TokenManager struct {
 	mdAccessToken  string
 	expirationTime time.Time
 	userID         int
+	accountID      int
 	username       string
 	credentials    map[string]interface{}
 	baseURL        string
@@ -124,6 +133,7 @@ func (tm *TokenManager) Authenticate() error {
 
 	// Read response
 	respBody, err := io.ReadAll(resp.Body)
+
 	if err != nil {
 		return fmt.Errorf("Error reading response: %w", err)
 	}
@@ -204,6 +214,54 @@ func (tm *TokenManager) GetUsername() string {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 	return tm.username
+}
+
+// GetAccountID returns the cached account ID, fetching it if necessary
+func (tm *TokenManager) GetAccountID() (int, error) {
+	tm.mu.RLock()
+	if tm.accountID != 0 {
+		defer tm.mu.RUnlock()
+		return tm.accountID, nil
+	}
+	tm.mu.RUnlock()
+
+	// Ensure we have a token
+	token, err := tm.GetAccessToken()
+	if err != nil {
+		return 0, err
+	}
+
+	// Fetch accounts
+	resp, err := tm.MakeAuthenticatedRequest("GET", "/v1/account/list", nil, token)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("failed to list accounts: %s", string(body))
+	}
+
+	var accounts []Account
+	if err := json.NewDecoder(resp.Body).Decode(&accounts); err != nil {
+		return 0, fmt.Errorf("failed to decode account list: %w", err)
+	}
+
+	if len(accounts) == 0 {
+		return 0, fmt.Errorf("no accounts found")
+	}
+
+	// Cache the first account ID
+	tm.mu.Lock()
+	tm.accountID = accounts[0].ID
+	tm.mu.Unlock()
+
+	if tm.log != nil {
+		tm.log.Infof("Using Account ID: %d (%s)", accounts[0].ID, accounts[0].Name)
+	}
+
+	return accounts[0].ID, nil
 }
 
 // IsAuthenticated checks if there's a valid token
