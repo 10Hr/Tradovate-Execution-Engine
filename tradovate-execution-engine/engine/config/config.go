@@ -9,6 +9,7 @@ import (
 // Config holds all configuration settings
 type Config struct {
 	Tradovate TradovateConfig `json:"tradovate"`
+	Risk      RiskConfig      `json:"risk"`
 }
 
 // TradovateConfig holds Tradovate-specific credentials
@@ -23,6 +24,31 @@ type TradovateConfig struct {
 	Password    string `json:"password"`
 	Sec         string `json:"sec"`
 	Enc         bool   `json:"enc"`
+}
+
+// RiskConfig holds risk management and order configuration
+type RiskConfig struct {
+	MaxContracts     int     `json:"maxContracts"`
+	DailyLossLimit   float64 `json:"dailyLossLimit"`
+	MaxOrderRetries  int     `json:"maxOrderRetries"`
+	OrderTimeout     int     `json:"orderTimeout"`
+	EnableRiskChecks bool    `json:"enableRiskChecks"`
+}
+
+// GetHTTPBaseURL returns the HTTP API base URL for the given environment
+func GetHTTPBaseURL(environment string) string {
+	if environment == "live" {
+		return "https://live.tradovateapi.com"
+	}
+	return "https://demo.tradovateapi.com"
+}
+
+// GetWSBaseURL returns the WebSocket API base URL for the given environment
+func GetWSBaseURL(environment string) string {
+	if environment == "live" {
+		return "wss://md-live.tradovateapi.com/v1/websocket"
+	}
+	return "wss://md-demo.tradovateapi.com/v1/websocket"
 }
 
 // LoadConfig reads the configuration from a JSON file
@@ -68,6 +94,13 @@ func CreateDefaultConfig(filename string) error {
 			Password:    "your_password_here",
 			Sec:         "your_security_token_here",
 			Enc:         true,
+		},
+		Risk: RiskConfig{
+			MaxContracts:     1,
+			DailyLossLimit:   500.0,
+			MaxOrderRetries:  3,
+			OrderTimeout:     30,
+			EnableRiskChecks: true,
 		},
 	}
 

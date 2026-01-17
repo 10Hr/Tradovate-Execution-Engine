@@ -12,6 +12,16 @@ import (
 	"tradovate-execution-engine/engine/internal/logger"
 )
 
+// APIPosition represents the Tradovate position response
+type APIPosition struct {
+	ID          int     `json:"id"`
+	ContractID  int     `json:"contractId"`
+	NetPos      int     `json:"netPos"`
+	NetPrice    float64 `json:"netPrice"`
+	BoughtValue float64 `json:"boughtValue"`
+	SoldValue   float64 `json:"soldValue"`
+}
+
 // OrderManager handles order submission and tracking
 type OrderManager struct {
 	mu              sync.RWMutex
@@ -33,6 +43,25 @@ func NewOrderManager(symbol string, config *Config, log *logger.Logger) *OrderMa
 		log:             log,
 		orderIDCounter:  0,
 	}
+}
+
+// HandlePositionUpdate processes real-time position updates
+func (om *OrderManager) HandlePositionUpdate(pos APIPosition) {
+	om.log.Infof("Processing Position Update: NetPos %d @ %.2f", pos.NetPos, pos.NetPrice)
+
+	// Realized PnL Calculation:
+	// Cash Flow = SoldValue - BoughtValue
+	// Cost of Open Position = NetPos * NetPrice
+	// Realized PnL = Cash Flow + Cost of Open Position
+
+	realizedPnLPoints := (pos.SoldValue - pos.BoughtValue) + (float64(pos.NetPos) * pos.NetPrice)
+
+	// Multiplier (Hardcoded 50 for now, ideally dynamic)
+	multiplier := 50.0
+	realizedPnL := realizedPnLPoints * multiplier
+
+	om.positionTracker.UpdatePositionFromAPI(pos.NetPos, pos.NetPrice, realizedPnL)
+	om.riskManager.SetDailyPnL(realizedPnL)
 }
 
 // SubmitMarketOrder submits a market order
@@ -57,8 +86,8 @@ func (om *OrderManager) SubmitMarketOrder(symbol string, side OrderSide, quantit
 	om.orders[orderID] = order
 	om.mu.Unlock()
 
-	//om.log.Infof("Created market order: %s %s %d %s", orderID, side, quantity, symbol)
-	fmt.Printf("Created market order: %s %s %d %s\n", orderID, side, quantity, symbol)
+	//fmt.Printf("Created market order: %s %s %d %s\n", orderID, side, quantity, symbol)
+	om.log.Infof("Created market order: %s %s %d %s", orderID, side, quantity, symbol)
 	// Check risk before submitting
 	currentPosition := om.positionTracker.GetPosition()
 	if err := om.riskManager.CheckOrderRisk(order, &currentPosition); err != nil {
@@ -76,51 +105,52 @@ func (om *OrderManager) SubmitMarketOrder(symbol string, side OrderSide, quantit
 	return order, nil
 }
 
-// SubmitLimitOrder submits a limit order
-func (om *OrderManager) SubmitLimitOrder(symbol string, side OrderSide, quantity int, price float64) (*Order, error) {
-	om.mu.Lock()
+// // SubmitLimitOrder submits a limit order
+// func (om *OrderManager) SubmitLimitOrder(symbol string, side OrderSide, quantity int, price float64) (*Order, error) {
+// 	om.mu.Lock()
 
-	om.orderIDCounter++
-	orderID := fmt.Sprintf("ORD-%s-%d-%d", symbol, time.Now().Unix(), om.orderIDCounter)
+// 	om.orderIDCounter++
+// 	orderID := fmt.Sprintf("ORD-%s-%d-%d", symbol, time.Now().Unix(), om.orderIDCounter)
 
-	order := &Order{
-		ID:          orderID,
-		Symbol:      symbol,
-		Side:        side,
-		Type:        TypeLimit,
-		Quantity:    quantity,
-		Price:       price,
-		Status:      StatusPending,
-		SubmittedAt: time.Now(),
-	}
+// 	order := &Order{
+// 		ID:          orderID,
+// 		Symbol:      symbol,
+// 		Side:        side,
+// 		Type:        TypeLimit,
+// 		Quantity:    quantity,
+// 		Price:       price,
+// 		Status:      StatusPending,
+// 		SubmittedAt: time.Now(),
+// 	}
 
-	om.orders[orderID] = order
-	om.mu.Unlock()
+// 	om.orders[orderID] = order
+// 	om.mu.Unlock()
 
-	om.log.Infof("Created limit order: %s %s %d %s @ %.2f", orderID, side, quantity, symbol, price)
+// 	om.log.Infof("Created limit order: %s %s %d %s @ %.2f", orderID, side, quantity, symbol, price)
 
-	// Check risk before submitting
-	currentPosition := om.positionTracker.GetPosition()
-	if err := om.riskManager.CheckOrderRisk(order, &currentPosition); err != nil {
-		om.updateOrderStatus(orderID, StatusRejected, err.Error())
-		return order, fmt.Errorf("risk check failed: %w", err)
-	}
+// 	// Check risk before submitting
+// 	currentPosition := om.positionTracker.GetPosition()
+// 	if err := om.riskManager.CheckOrderRisk(order, &currentPosition); err != nil {
+// 		om.updateOrderStatus(orderID, StatusRejected, err.Error())
+// 		return order, fmt.Errorf("risk check failed: %w", err)
+// 	}
 
-	// Submit order
-	if err := om.submitOrderToExchange(order); err != nil {
-		om.updateOrderStatus(orderID, StatusFailed, err.Error())
-		return order, err
-	}
+// 	// Submit order
+// 	if err := om.submitOrderToExchange(order); err != nil {
+// 		om.updateOrderStatus(orderID, StatusFailed, err.Error())
+// 		return order, err
+// 	}
 
-	om.updateOrderStatus(orderID, StatusSubmitted, "")
-	return order, nil
-}
+// 	om.updateOrderStatus(orderID, StatusSubmitted, "")
+// 	return order, nil
+// }
 
 // submitOrderToExchange submits order to the exchange (Tradovate API)
 func (om *OrderManager) submitOrderToExchange(order *Order) error {
 	//om.log.Infof("Submitting order %s to exchange...", order.ID)
+	om.log.Infof("Submitting order %s to exchange...", order.ID)
 
-	fmt.Printf("Submitting order %s to exchange...\n", order.ID)
+	//fmt.Printf("Submitting order %s to exchange...\n", order.ID)
 	// Get TokenManager
 	tm := auth.GetTokenManager()
 
@@ -191,7 +221,8 @@ func (om *OrderManager) submitOrderToExchange(order *Order) error {
 		order.ExternalID = orderIdStr
 	}
 
-	fmt.Printf("Order %s submitted successfully (External ID: %s)\n", order.ID, order.ExternalID)
+	//fmt.Printf("Order %s submitted successfully (External ID: %s)\n", order.ID, order.ExternalID)
+	om.log.Infof("Order %s submitted successfully (External ID: %s)", order.ID, order.ExternalID)
 	//om.log.Infof("Order %s submitted successfully (External ID: %s)", order.ID, order.ExternalID)
 	return nil
 }
@@ -223,14 +254,13 @@ func (om *OrderManager) ProcessFill(orderID string, fillPrice float64, fillQuant
 		Quantity:  fillQuantity,
 		Timestamp: time.Now(),
 	}
-	om.positionTracker.UpdateFill(fill, order.Side)
+	realizedPnL := om.positionTracker.UpdateFill(fill, order.Side)
 
 	// Update trade count
 	om.riskManager.IncrementTradeCount()
 
 	// Update daily PnL if position was reduced/closed
-	position := om.positionTracker.GetPosition()
-	om.riskManager.UpdatePnL(position.RealizedPnL)
+	om.riskManager.UpdatePnL(realizedPnL)
 
 	om.log.Infof("Order %s filled: %s %d %s @ %.2f",
 		orderID, order.Side, fillQuantity, order.Symbol, fillPrice)

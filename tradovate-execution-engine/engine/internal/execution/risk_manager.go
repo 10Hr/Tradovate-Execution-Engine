@@ -77,6 +77,13 @@ func (rm *RiskManager) GetDailyPnL() float64 {
 	return rm.dailyPnL
 }
 
+// SetDailyPnL sets the daily PnL (e.g. from API sync)
+func (rm *RiskManager) SetDailyPnL(pnl float64) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	rm.dailyPnL = pnl
+}
+
 // IncrementTradeCount increments the daily trade counter
 func (rm *RiskManager) IncrementTradeCount() {
 	rm.mu.Lock()

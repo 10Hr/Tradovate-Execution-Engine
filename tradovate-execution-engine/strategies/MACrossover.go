@@ -1,6 +1,9 @@
 package strategies
 
-import "tradovate-execution-engine/indicators"
+import (
+	//"tradovate-execution-engine/engine/internal/execution"
+	"tradovate-execution-engine/indicators"
+)
 
 // Position represents the current position
 type Position int
@@ -13,14 +16,16 @@ const (
 
 // MACrossover implements a moving average crossover strategy
 type MACrossover struct {
+	Symbol   string
 	fastSMA  *indicators.SMA
 	slowSMA  *indicators.SMA
 	position Position
 }
 
 // NewMACrossover creates a new MA crossover strategy with 5 and 15 period SMAs
-func NewMACrossover(sma1Len, sma2Len int, mode indicators.UpdateMode) *MACrossover {
+func NewMACrossover(symbol string, sma1Len, sma2Len int, mode indicators.UpdateMode) *MACrossover {
 	return &MACrossover{
+		Symbol:   symbol,
 		fastSMA:  indicators.NewSMA(sma1Len, mode),
 		slowSMA:  indicators.NewSMA(sma2Len, mode),
 		position: Flat,
@@ -28,8 +33,8 @@ func NewMACrossover(sma1Len, sma2Len int, mode indicators.UpdateMode) *MACrossov
 }
 
 // NewDefaultMACrossover creates a new MA crossover strategy with default settings 5 and 15
-func NewDefaultMACrossover(mode indicators.UpdateMode) *MACrossover {
-	return NewMACrossover(5, 15, mode)
+func NewDefaultMACrossover(symbol string, mode indicators.UpdateMode) *MACrossover {
+	return NewMACrossover(symbol, 5, 15, mode)
 }
 
 // Update processes a new price and returns the signal
@@ -44,14 +49,22 @@ func (m *MACrossover) Update(price float64) (Position, bool) {
 // checkSignal checks for crossover signals
 func (m *MACrossover) checkSignal(lookback int) (Position, bool) {
 	if m.CrossAbove(lookback) {
-		if m.position != Long {
+		if m.position == Flat {
 			m.position = Long
+			//execution.SubmitMarketOrder(symbol, execution.SideBuy, 1)
 			return Long, true
 		}
+		if m.position == Short {
+			//execution.FlattenPosition(symbol)
+		}
 	} else if m.CrossBelow(lookback) {
-		if m.position != Short {
+		if m.position == Flat {
 			m.position = Short
+			//execution.SubmitMarketOrder(symbol, execution.SideSell, 1)
 			return Short, true
+		}
+		if m.position == Long {
+			//execution.FlattenPosition(symbol)
 		}
 	}
 

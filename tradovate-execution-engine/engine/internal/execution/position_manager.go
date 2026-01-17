@@ -31,8 +31,27 @@ func NewPositionTracker(symbol string, log *logger.Logger) *PositionTracker {
 	}
 }
 
-// UpdateFill updates position based on a fill
-func (pt *PositionTracker) UpdateFill(fill *Fill, side OrderSide) {
+// UpdatePositionFromAPI updates the position state from external API data
+func (pt *PositionTracker) UpdatePositionFromAPI(quantity int, avgPrice float64, realizedPnL float64) {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+
+	pt.position.Quantity = quantity
+	pt.position.EntryPrice = avgPrice
+	pt.position.RealizedPnL = realizedPnL // If we can get this from API
+	
+	// If quantity is 0, ensure we are flat
+	if quantity == 0 {
+		pt.position.EntryPrice = 0
+		pt.position.OpenedAt = time.Time{}
+	}
+
+	pt.updateUnrealizedPnL()
+	pt.log.Infof("Position synced from API: %d @ %.2f, Realized: %.2f", quantity, avgPrice, realizedPnL)
+}
+
+// UpdateFill updates position based on a fill and returns the realized PnL from this fill
+func (pt *PositionTracker) UpdateFill(fill *Fill, side OrderSide) float64 {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
 
@@ -42,6 +61,8 @@ func (pt *PositionTracker) UpdateFill(fill *Fill, side OrderSide) {
 	if side == SideSell {
 		fillQty = -fillQty
 	}
+
+	var realizedPnL float64
 
 	// Check if this is closing or reducing a position
 	if pt.position.Quantity != 0 &&
@@ -54,7 +75,7 @@ func (pt *PositionTracker) UpdateFill(fill *Fill, side OrderSide) {
 		if pt.position.Quantity < 0 {
 			pnlPerContract = -pnlPerContract
 		}
-		realizedPnL := pnlPerContract * float64(closingQty)
+		realizedPnL = pnlPerContract * float64(closingQty)
 		pt.position.RealizedPnL += realizedPnL
 
 		pt.log.Infof("Position reduced/closed. Realized PnL: $%.2f", realizedPnL)
@@ -92,6 +113,8 @@ func (pt *PositionTracker) UpdateFill(fill *Fill, side OrderSide) {
 
 	pt.updateUnrealizedPnL()
 	pt.logPosition()
+
+	return realizedPnL
 }
 
 // UpdatePrice updates the current market price and recalculates PnL
@@ -107,6 +130,11 @@ func (pt *PositionTracker) UpdatePrice(price float64) {
 // updateUnrealizedPnL calculates unrealized PnL (must be called with lock held)
 func (pt *PositionTracker) updateUnrealizedPnL() {
 	if pt.position.Quantity == 0 {
+		pt.position.UnrealizedPnL = 0
+		return
+	}
+
+	if pt.position.CurrentPrice == 0 {
 		pt.position.UnrealizedPnL = 0
 		return
 	}

@@ -1,13 +1,9 @@
 package execution
 
+import "tradovate-execution-engine/engine/config"
+
 // Config holds risk management and order configuration
-type Config struct {
-	MaxContracts     int     // Maximum contracts per position
-	DailyLossLimit   float64 // Daily loss limit in dollars
-	MaxOrderRetries  int     // Maximum number of order submission retries
-	OrderTimeout     int     // Order timeout in seconds
-	EnableRiskChecks bool    // Enable/disable risk checks
-}
+type Config = config.RiskConfig
 
 // DefaultConfig returns default configuration
 func DefaultConfig() *Config {

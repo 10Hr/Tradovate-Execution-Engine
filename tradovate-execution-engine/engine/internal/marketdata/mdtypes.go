@@ -2,6 +2,11 @@ package marketdata
 
 import "encoding/json"
 
+// WebSocketSender is an interface for sending messages through WebSocket
+type WebSocketSender interface {
+	Send(url string, body interface{}) error
+}
+
 // Market data structures
 type Quote struct {
 	Timestamp  string           `json:"timestamp"`
@@ -78,6 +83,7 @@ type TimeRange struct {
 const (
 	EventMarketData = "md"
 	EventChart      = "chart"
+	EventUser       = "user/syncrequest"
 )
 
 // Subscription types

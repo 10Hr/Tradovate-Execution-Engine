@@ -1,0 +1,264 @@
+package api
+
+import (
+	"encoding/json"
+	"fmt"
+	"sync"
+	"tradovate-execution-engine/engine/internal/logger"
+	"tradovate-execution-engine/engine/internal/marketdata"
+	//"tradovate-execution-engine/engine/internal/marketdata"
+)
+
+// DataSubscriber manages real-time market data subscriptions
+type DataSubscriber struct {
+	client        marketdata.WebSocketSender
+	subscriptions map[string]string
+	mu            sync.RWMutex
+	log           *logger.Logger
+
+	// Custom handlers
+	OnQuoteUpdate func(quote marketdata.Quote)
+	OnChartUpdate func(chart marketdata.ChartUpdate)
+}
+
+// NewDataSubscriber creates a new market data subscriber
+func NewDataSubscriber(client marketdata.WebSocketSender) *DataSubscriber {
+	return &DataSubscriber{
+		client:        client,
+		subscriptions: make(map[string]string),
+	}
+}
+
+// SetLogger sets the logger for the subscriber
+func (s *DataSubscriber) SetLogger(l *logger.Logger) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.log = l
+}
+
+// HandleEvent processes incoming market data events
+func (s *DataSubscriber) HandleEvent(eventType string, data json.RawMessage) {
+	switch eventType {
+	case marketdata.EventMarketData:
+		s.handleMarketData(data)
+	case marketdata.EventChart:
+		s.handleChartData(data)
+	case marketdata.EventUser:
+		// Handle user events if needed
+	default:
+		if s.log != nil {
+			s.log.Warnf("Unknown event type: %s", eventType)
+		}
+	}
+}
+
+// handleMarketData processes market data events (quotes)
+func (s *DataSubscriber) handleMarketData(data json.RawMessage) {
+	quoteData, err := marketdata.ParseQuoteData(data)
+	if err != nil {
+		if s.log != nil {
+			s.log.Errorf("Error unmarshaling quote data: %v", err)
+		}
+		return
+	}
+
+	for _, quote := range quoteData.Quotes {
+		if s.log != nil {
+			s.log.Debugf("Quote Update - Contract: %d, Timestamp: %s",
+				quote.ContractID, quote.Timestamp)
+
+			if bid, ok := quote.Entries["Bid"]; ok {
+				s.log.Debugf("  Bid: %.2f @ %.0f", bid.Price, bid.Size)
+			}
+			if offer, ok := quote.Entries["Offer"]; ok {
+				s.log.Debugf("  Offer: %.2f @ %.0f", offer.Price, offer.Size)
+			}
+			if trade, ok := quote.Entries["Trade"]; ok {
+				s.log.Infof("  Last: %.2f @ %.0f", trade.Price, trade.Size)
+			}
+		}
+
+		// Call custom handler if set
+		if s.OnQuoteUpdate != nil {
+			s.OnQuoteUpdate(quote)
+		}
+	}
+}
+
+// handleChartData processes chart/tick data events
+func (s *DataSubscriber) handleChartData(data json.RawMessage) {
+	chartUpdate, err := marketdata.ParseChartData(data)
+	if err != nil {
+		if s.log != nil {
+			s.log.Errorf("Error unmarshaling chart data: %v", err)
+		}
+		return
+	}
+
+	for _, chart := range chartUpdate.Charts {
+		if len(chart.Ticks) > 0 {
+			if s.log != nil {
+				s.log.Debugf("Tick data received - Chart ID: %d, Ticks: %d", chart.ID, len(chart.Ticks))
+				for _, tick := range chart.Ticks {
+					s.log.Debugf("  Tick: %s - Price: %.2f, Size: %.0f",
+						tick.Timestamp, tick.Price, tick.Size)
+				}
+			}
+		}
+
+		if len(chart.Bars) > 0 {
+			if s.log != nil {
+				s.log.Debugf("Bar data received - Chart ID: %d, Bars: %d", chart.ID, len(chart.Bars))
+			}
+		}
+	}
+
+	// Call custom handler if set
+	if s.OnChartUpdate != nil {
+		s.OnChartUpdate(*chartUpdate)
+	}
+}
+
+// SubscribeQuote subscribes to real-time quote data for a symbol
+func (s *DataSubscriber) SubscribeQuote(symbol interface{}) error {
+	body := map[string]interface{}{
+		"symbol": symbol,
+	}
+
+	if err := s.client.Send("md/subscribeQuote", body); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	key := fmt.Sprintf("%s:%v", marketdata.SubscriptionTypeQuote, symbol)
+	s.subscriptions[key] = fmt.Sprintf("%v", symbol)
+	s.mu.Unlock()
+
+	if s.log != nil {
+		s.log.Infof("Subscribed to quotes for %v", symbol)
+	}
+	return nil
+}
+
+// UnsubscribeQuote unsubscribes from quote data
+func (s *DataSubscriber) UnsubscribeQuote(symbol interface{}) error {
+	body := map[string]interface{}{
+		"symbol": symbol,
+	}
+
+	if err := s.client.Send("md/unsubscribeQuote", body); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	key := fmt.Sprintf("%s:%v", marketdata.SubscriptionTypeQuote, symbol)
+	delete(s.subscriptions, key)
+	s.mu.Unlock()
+
+	if s.log != nil {
+		s.log.Infof("Unsubscribed from quotes for %v", symbol)
+	}
+	return nil
+}
+
+// SubscribeTickChart subscribes to real-time tick data
+func (s *DataSubscriber) SubscribeTickChart(symbol interface{}) error {
+	params := map[string]interface{}{
+		"symbol": symbol,
+		"chartDescription": map[string]interface{}{
+			"underlyingType": "Tick",
+		},
+	}
+
+	if err := s.client.Send("md/subscribechart", params); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	key := fmt.Sprintf("%s:%v", marketdata.SubscriptionTypeTick, symbol)
+	s.subscriptions[key] = fmt.Sprintf("%v", symbol)
+	s.mu.Unlock()
+
+	if s.log != nil {
+		s.log.Infof("Subscribed to tick chart for %v", symbol)
+	}
+	return nil
+}
+
+// UnsubscribeChart unsubscribes from chart data
+func (s *DataSubscriber) UnsubscribeChart(symbol interface{}) error {
+	body := map[string]interface{}{
+		"symbol": symbol,
+	}
+
+	if err := s.client.Send("md/unsubscribechart", body); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	key := fmt.Sprintf("%s:%v", marketdata.SubscriptionTypeTick, symbol)
+	delete(s.subscriptions, key)
+	s.mu.Unlock()
+
+	if s.log != nil {
+		s.log.Infof("Unsubscribed from tick chart for %v", symbol)
+	}
+	return nil
+}
+
+func (s *DataSubscriber) SubscribeUserSyncRequests() error {
+	body := map[string]interface{}{}
+
+	if err := s.client.Send("user/syncRequest", body); err != nil {
+		return err
+	}
+
+	if s.log != nil {
+		s.log.Info("Subscribed to user sync requests")
+	}
+	return nil
+}
+
+// UnsubscribeAll unsubscribes from all active subscriptions
+func (s *DataSubscriber) UnsubscribeAll() error {
+	s.mu.Lock()
+	subscriptions := make(map[string]string)
+	for k, v := range s.subscriptions {
+		subscriptions[k] = v
+	}
+	s.mu.Unlock()
+
+	for key, symbol := range subscriptions {
+		if len(key) >= 5 {
+			subscriptionType := key[:5]
+			switch subscriptionType {
+			case marketdata.SubscriptionTypeQuote:
+				if err := s.UnsubscribeQuote(symbol); err != nil {
+					if s.log != nil {
+						s.log.Errorf("Error unsubscribing quote for %v: %v", symbol, err)
+					}
+				}
+			case marketdata.SubscriptionTypeTick + ":":
+				if err := s.UnsubscribeChart(symbol); err != nil {
+					if s.log != nil {
+						s.log.Errorf("Error unsubscribing chart for %v: %v", symbol, err)
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// GetActiveSubscriptions returns a copy of active subscriptions
+func (s *DataSubscriber) GetActiveSubscriptions() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	subscriptions := make(map[string]string)
+	for k, v := range s.subscriptions {
+		subscriptions[k] = v
+	}
+	return subscriptions
+}

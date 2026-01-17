@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 
 	"tradovate-execution-engine/engine/internal/execution"
 	"tradovate-execution-engine/engine/internal/logger"
@@ -108,24 +107,24 @@ func main() {
 	log.Info("")
 
 	// Test 11: Submit and cancel limit order
-	log.Info("TEST 11: Submitting and canceling limit order")
-	limitOrder, err := orderManager.SubmitLimitOrder(symbol, execution.SideBuy, 1, 5845.00)
-	if err != nil {
-		log.Errorf("Failed to submit limit order: %v", err)
-	} else {
-		log.Infof("Limit order submitted: %s", limitOrder.ID)
-		printOrder(limitOrder, log)
+	//log.Info("TEST 11: Submitting and canceling limit order")
+	//limitOrder, err := orderManager.SubmitLimitOrder(symbol, execution.SideBuy, 1, 5845.00)
+	// if err != nil {
+	// 	log.Errorf("Failed to submit limit order: %v", err)
+	// } else {
+	// 	log.Infof("Limit order submitted: %s", limitOrder.ID)
+	// 	printOrder(limitOrder, log)
 
-		// Cancel the order
-		time.Sleep(100 * time.Millisecond)
-		err = orderManager.CancelOrder(limitOrder.ID)
-		if err != nil {
-			log.Errorf("Failed to cancel order: %v", err)
-		} else {
-			log.Info("Order canceled successfully")
-		}
-	}
-	log.Info("")
+	// 	// Cancel the order
+	// 	time.Sleep(100 * time.Millisecond)
+	// 	err = orderManager.CancelOrder(limitOrder.ID)
+	// 	if err != nil {
+	// 		log.Errorf("Failed to cancel order: %v", err)
+	// 	} else {
+	// 		log.Info("Order canceled successfully")
+	// 	}
+	// }
+	// log.Info("")
 
 	// Test 12: Get all orders
 	log.Info("TEST 12: Retrieving all orders")

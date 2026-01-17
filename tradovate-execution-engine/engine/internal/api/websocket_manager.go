@@ -1,11 +1,13 @@
-package auth
+package api
 
 import (
 	"encoding/json"
 	"fmt"
-	"log"
-	"sync"
-	"time"
+	sync "sync"
+	time "time"
+
+	"tradovate-execution-engine/engine/config"
+	"tradovate-execution-engine/engine/internal/logger"
 
 	"github.com/gorilla/websocket"
 )
@@ -20,6 +22,7 @@ type TradovateWebSocketClient struct {
 	conn         *websocket.Conn
 	isAuthorized bool
 	mu           sync.RWMutex
+	log          *logger.Logger
 
 	// Message handler for routing events
 	messageHandler MessageHandler
@@ -36,15 +39,19 @@ type WSResponse struct {
 // NewTradovateWebSocketClient creates a new WebSocket client
 func NewTradovateWebSocketClient(accessToken, environment string) *TradovateWebSocketClient {
 	// Market data uses separate endpoints: md-demo and md-live
-	wsURL := "wss://md-demo.tradovateapi.com/v1/websocket"
-	if environment == "live" {
-		wsURL = "wss://md-live.tradovateapi.com/v1/websocket"
-	}
+	wsURL := config.GetWSBaseURL(environment)
 
 	return &TradovateWebSocketClient{
 		accessToken: accessToken,
 		wsURL:       wsURL,
 	}
+}
+
+// SetLogger sets the logger for the WebSocket client
+func (c *TradovateWebSocketClient) SetLogger(l *logger.Logger) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.log = l
 }
 
 // SetMessageHandler sets the callback for handling incoming messages
@@ -54,7 +61,9 @@ func (c *TradovateWebSocketClient) SetMessageHandler(handler MessageHandler) {
 
 // Connect establishes WebSocket connection and authorizes
 func (c *TradovateWebSocketClient) Connect() error {
-	log.Printf("Connecting to WebSocket: %s", c.wsURL)
+	if c.log != nil {
+		c.log.Infof("Connecting to WebSocket: %s", c.wsURL)
+	}
 
 	var err error
 	c.conn, _, err = websocket.DefaultDialer.Dial(c.wsURL, nil)
@@ -62,7 +71,9 @@ func (c *TradovateWebSocketClient) Connect() error {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
-	log.Println("✓ WebSocket connected")
+	if c.log != nil {
+		c.log.Info("WebSocket connected")
+	}
 
 	// Start message handler
 	go c.handleMessages()
@@ -83,7 +94,9 @@ func (c *TradovateWebSocketClient) authorize() error {
 	// Tradovate uses plain text format delimited by newlines: authorize\n1\n\n{token}
 	authMsg := fmt.Sprintf("authorize\n1\n\n%s", c.accessToken)
 
-	log.Printf("Sending authorization...")
+	if c.log != nil {
+		c.log.Info("Sending authorization...")
+	}
 
 	c.mu.Lock()
 	if c.conn == nil {
@@ -110,7 +123,9 @@ func (c *TradovateWebSocketClient) authorize() error {
 			c.mu.RLock()
 			if c.isAuthorized {
 				c.mu.RUnlock()
-				log.Println("✓ WebSocket authorized")
+				if c.log != nil {
+					c.log.Info("✓ WebSocket authorized")
+				}
 				return nil
 			}
 			c.mu.RUnlock()
@@ -142,7 +157,9 @@ func (c *TradovateWebSocketClient) Send(url string, body interface{}) error {
 	// Note the double \n before the body
 	message := fmt.Sprintf("%s\n0\n\n%s", url, jsonBody)
 
-	log.Printf("Sending message: %s", message)
+	if c.log != nil {
+		c.log.Infof("Sending message: %s", message)
+	}
 
 	return c.conn.WriteMessage(websocket.TextMessage, []byte(message))
 }
@@ -152,7 +169,17 @@ func (c *TradovateWebSocketClient) handleMessages() {
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
-			log.Printf("Read error: %v", err)
+			c.mu.RLock()
+			closed := c.conn == nil
+			c.mu.RUnlock()
+
+			if closed {
+				return
+			}
+
+			if c.log != nil {
+				c.log.Warnf("Read error: %v", err)
+			}
 			return
 		}
 
@@ -167,7 +194,9 @@ func (c *TradovateWebSocketClient) handleMessages() {
 		switch frameType {
 		case 'o':
 			// Open frame - connection established
-			log.Println("WebSocket session opened")
+			if c.log != nil {
+				c.log.Info("WebSocket session opened")
+			}
 
 		case 'h':
 			// Heartbeat frame - send response
@@ -179,11 +208,15 @@ func (c *TradovateWebSocketClient) handleMessages() {
 
 		case 'c':
 			// Close frame
-			log.Printf("Server closing connection: %s", string(payload))
+			if c.log != nil {
+				c.log.Infof("Server closing connection: %s", string(payload))
+			}
 			return
 
 		default:
-			log.Printf("Unknown frame type: %c, payload: %s", frameType, string(payload))
+			if c.log != nil {
+				c.log.Warnf("Unknown frame type: %c, payload: %s", frameType, string(payload))
+			}
 		}
 	}
 }
@@ -202,14 +235,18 @@ func (c *TradovateWebSocketClient) sendHeartbeat() {
 func (c *TradovateWebSocketClient) handleArrayFrame(payload []byte) {
 	var messages []json.RawMessage
 	if err := json.Unmarshal(payload, &messages); err != nil {
-		log.Printf("Error unmarshaling array frame: %v, payload: %s", err, string(payload))
+		if c.log != nil {
+			c.log.Errorf("Error unmarshaling array frame: %v, payload: %s", err, string(payload))
+		}
 		return
 	}
 
 	for _, msg := range messages {
 		var response WSResponse
 		if err := json.Unmarshal(msg, &response); err != nil {
-			log.Printf("Error unmarshaling message: %v", err)
+			if c.log != nil {
+				c.log.Errorf("Error unmarshaling message: %v", err)
+			}
 			continue
 		}
 
@@ -218,13 +255,17 @@ func (c *TradovateWebSocketClient) handleArrayFrame(payload []byte) {
 			c.mu.Lock()
 			c.isAuthorized = true
 			c.mu.Unlock()
-			log.Println("Authorization confirmed")
+			if c.log != nil {
+				c.log.Info("Authorization confirmed")
+			}
 			continue
 		}
 
 		// Log any errors
 		if response.Status != 0 && response.Status != 200 {
-			log.Printf("Error response: Status %d - %s", response.Status, response.StatusText)
+			if c.log != nil {
+				c.log.Errorf("Error response: Status %d - %s", response.Status, response.StatusText)
+			}
 		}
 
 		// Handle event messages - delegate to message handler
@@ -243,9 +284,13 @@ func (c *TradovateWebSocketClient) handleArrayFrame(payload []byte) {
 // handleResponse processes response messages
 func (c *TradovateWebSocketClient) handleResponse(response WSResponse) {
 	if response.Status == 200 {
-		log.Printf("Request successful")
+		if c.log != nil {
+			c.log.Info("Request successful")
+		}
 	} else {
-		log.Printf("Request failed: Status %d - %s", response.Status, response.StatusText)
+		if c.log != nil {
+			c.log.Errorf("Request failed: Status %d - %s", response.Status, response.StatusText)
+		}
 	}
 }
 
@@ -262,7 +307,10 @@ func (c *TradovateWebSocketClient) Disconnect() error {
 	defer c.mu.Unlock()
 
 	if c.conn != nil {
-		return c.conn.Close()
+		err := c.conn.Close()
+		c.conn = nil
+		c.isAuthorized = false
+		return err
 	}
 
 	return nil

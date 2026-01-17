@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"tradovate-execution-engine/engine/config"
 	"tradovate-execution-engine/engine/internal/logger"
 )
 
@@ -90,11 +91,7 @@ func (tm *TokenManager) SetCredentials(appID, appVersion, chl, cid, deviceID, en
 	}
 
 	// Set base URL based on environment
-	if environment == "demo" {
-		tm.baseURL = "https://demo.tradovateapi.com"
-	} else {
-		tm.baseURL = "https://live.tradovateapi.com"
-	}
+	tm.baseURL = config.GetHTTPBaseURL(environment)
 }
 
 // Authenticate performs authentication and stores tokens
