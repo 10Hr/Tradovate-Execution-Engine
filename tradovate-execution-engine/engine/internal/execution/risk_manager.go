@@ -30,7 +30,7 @@ func NewRiskManager(config *Config, log *logger.Logger) *RiskManager {
 }
 
 // CheckOrderRisk validates if an order passes risk checks
-func (rm *RiskManager) CheckOrderRisk(order *Order, currentPosition *Position) error {
+func (rm *RiskManager) CheckOrderRisk(order *Order, currentPosition *PositionPL, workingBuyQty, workingSellQty int) error {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
@@ -51,10 +51,28 @@ func (rm *RiskManager) CheckOrderRisk(order *Order, currentPosition *Position) e
 	}
 
 	// Check max contracts
-	newPositionSize := rm.calculateNewPositionSize(order, currentPosition)
-	if abs(newPositionSize) > rm.config.MaxContracts {
-		rm.log.Errorf("Order would exceed max contracts limit: %d", rm.config.MaxContracts)
-		return fmt.Errorf("order would exceed max contracts limit of %d", rm.config.MaxContracts)
+	currentQty := 0
+	if currentPosition != nil {
+		currentQty = currentPosition.NetPos
+	}
+
+	// Calculate potential position based on order side
+	// We want to ensure that even if all working orders fill, we don't exceed limits
+	if order.Side == SideBuy {
+		// Current position + existing working buys + this new buy order
+		potentialMaxLong := currentQty + workingBuyQty + order.Quantity
+		if potentialMaxLong > rm.config.MaxContracts {
+			rm.log.Errorf("Order would exceed max contracts limit: %d (Potential Long: %d)", rm.config.MaxContracts, potentialMaxLong)
+			return fmt.Errorf("order would exceed max contracts limit of %d", rm.config.MaxContracts)
+		}
+	} else { // SideSell
+		// Current position - existing working sells - this new sell order
+		// Note: workingSellQty and order.Quantity are positive, so we subtract them
+		potentialMaxShort := currentQty - workingSellQty - order.Quantity
+		if potentialMaxShort < -rm.config.MaxContracts {
+			rm.log.Errorf("Order would exceed max contracts limit: %d (Potential Short: %d)", rm.config.MaxContracts, potentialMaxShort)
+			return fmt.Errorf("order would exceed max contracts limit of %d", rm.config.MaxContracts)
+		}
 	}
 
 	rm.log.Infof("Risk check passed for order: %s %d %s", order.Side, order.Quantity, order.Symbol)
@@ -105,21 +123,6 @@ func (rm *RiskManager) resetDailyPnL() {
 	rm.tradeCount = 0
 	rm.dailyPnLReset = time.Now()
 	rm.log.Info("Daily PnL and trade count reset")
-}
-
-// calculateNewPositionSize calculates what the position size would be after the order
-func (rm *RiskManager) calculateNewPositionSize(order *Order, currentPosition *Position) int {
-	currentQty := 0
-	if currentPosition != nil {
-		currentQty = currentPosition.Quantity
-	}
-
-	orderQty := order.Quantity
-	if order.Side == SideSell {
-		orderQty = -orderQty
-	}
-
-	return currentQty + orderQty
 }
 
 // abs returns absolute value

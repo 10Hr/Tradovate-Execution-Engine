@@ -3,8 +3,9 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	sync "sync"
-	time "time"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"tradovate-execution-engine/engine/config"
 	"tradovate-execution-engine/engine/internal/logger"
@@ -26,10 +27,15 @@ type TradovateWebSocketClient struct {
 
 	// Message handler for routing events
 	messageHandler MessageHandler
+
+	// Refinements
+	nextRequestID uint32
+	openChan      chan struct{}
 }
 
 // WSResponse represents a WebSocket response from Tradovate
 type WSResponse struct {
+	ID         int             `json:"i,omitempty"`
 	Status     int             `json:"s,omitempty"`
 	Event      string          `json:"e,omitempty"`
 	Data       json.RawMessage `json:"d,omitempty"`
@@ -44,6 +50,7 @@ func NewTradovateWebSocketClient(accessToken, environment string) *TradovateWebS
 	return &TradovateWebSocketClient{
 		accessToken: accessToken,
 		wsURL:       wsURL,
+		openChan:    make(chan struct{}),
 	}
 }
 
@@ -88,8 +95,13 @@ func (c *TradovateWebSocketClient) Connect() error {
 
 // authorize sends authorization message with access token
 func (c *TradovateWebSocketClient) authorize() error {
-	// Wait a moment for the open frame to complete
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the open frame to complete
+	select {
+	case <-c.openChan:
+		// Connection is open
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("timeout waiting for open frame")
+	}
 
 	// Tradovate uses plain text format delimited by newlines: authorize\n1\n\n{token}
 	authMsg := fmt.Sprintf("authorize\n1\n\n%s", c.accessToken)
@@ -155,10 +167,11 @@ func (c *TradovateWebSocketClient) Send(url string, body interface{}) error {
 
 	// Format: url\nrequest_id\n\njson_body
 	// Note the double \n before the body
-	message := fmt.Sprintf("%s\n0\n\n%s", url, jsonBody)
+	requestID := atomic.AddUint32(&c.nextRequestID, 1)
+	message := fmt.Sprintf("%s\n%d\n\n%s", url, requestID, jsonBody)
 
 	if c.log != nil {
-		c.log.Infof("Sending message: %s", message)
+		c.log.Infof("Sending message (ID %d): %s", requestID, url)
 	}
 
 	return c.conn.WriteMessage(websocket.TextMessage, []byte(message))
@@ -194,6 +207,15 @@ func (c *TradovateWebSocketClient) handleMessages() {
 		switch frameType {
 		case 'o':
 			// Open frame - connection established
+			c.mu.Lock()
+			select {
+			case <-c.openChan:
+				// Already closed
+			default:
+				close(c.openChan)
+			}
+			c.mu.Unlock()
+
 			if c.log != nil {
 				c.log.Info("WebSocket session opened")
 			}
@@ -285,11 +307,11 @@ func (c *TradovateWebSocketClient) handleArrayFrame(payload []byte) {
 func (c *TradovateWebSocketClient) handleResponse(response WSResponse) {
 	if response.Status == 200 {
 		if c.log != nil {
-			c.log.Info("Request successful")
+			c.log.Infof("Request %d successful", response.ID)
 		}
 	} else {
 		if c.log != nil {
-			c.log.Errorf("Request failed: Status %d - %s", response.Status, response.StatusText)
+			c.log.Errorf("Request %d failed: Status %d - %s", response.ID, response.Status, response.StatusText)
 		}
 	}
 }

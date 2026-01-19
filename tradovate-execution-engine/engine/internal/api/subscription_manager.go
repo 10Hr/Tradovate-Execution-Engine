@@ -17,8 +17,11 @@ type DataSubscriber struct {
 	log           *logger.Logger
 
 	// Custom handlers
-	OnQuoteUpdate func(quote marketdata.Quote)
-	OnChartUpdate func(chart marketdata.ChartUpdate)
+	OnQuoteUpdate    func(quote marketdata.Quote)
+	OnChartUpdate    func(chart marketdata.ChartUpdate)
+	OnOrderUpdate    func(data json.RawMessage)
+	OnPositionUpdate func(data json.RawMessage)
+	OnUserSync       func(data json.RawMessage)
 }
 
 // NewDataSubscriber creates a new market data subscriber
@@ -44,11 +47,83 @@ func (s *DataSubscriber) HandleEvent(eventType string, data json.RawMessage) {
 	case marketdata.EventChart:
 		s.handleChartData(data)
 	case marketdata.EventUser:
-		// Handle user events if needed
+		// User sync often contains positions and orders
+		if s.OnUserSync != nil {
+			s.OnUserSync(data)
+		}
+		s.handleUserEvent(data)
+	case marketdata.EventOrder:
+		if s.OnOrderUpdate != nil {
+			s.OnOrderUpdate(data)
+		}
+	case marketdata.EventPosition:
+		if s.OnPositionUpdate != nil {
+			s.OnPositionUpdate(data)
+		}
+	case marketdata.EventProps:
+		s.handlePropsEvent(data)
 	default:
 		if s.log != nil {
 			s.log.Warnf("Unknown event type: %s", eventType)
 		}
+	}
+}
+
+// handlePropsEvent handles incremental updates
+func (s *DataSubscriber) handlePropsEvent(data json.RawMessage) {
+	var props struct {
+		EntityType string          `json:"entityType"`
+		Entity     json.RawMessage `json:"entity"`
+	}
+	if err := json.Unmarshal(data, &props); err != nil {
+		if s.log != nil {
+			s.log.Warnf("Failed to parse props event: %v", err)
+		}
+		return
+	}
+
+	switch props.EntityType {
+	case "order":
+		if s.OnOrderUpdate != nil {
+			s.OnOrderUpdate(props.Entity)
+		}
+	case "position":
+		if s.OnPositionUpdate != nil {
+			s.OnPositionUpdate(props.Entity)
+		}
+	}
+}
+
+// handleUserEvent processes user sync events which may contain orders/positions
+func (s *DataSubscriber) handleUserEvent(data json.RawMessage) {
+	// UserSync response structure
+	var syncData struct {
+		Orders    []json.RawMessage `json:"orders"`
+		Positions []json.RawMessage `json:"positions"`
+	}
+
+	if err := json.Unmarshal(data, &syncData); err == nil {
+		// If successfully parsed as a sync object, iterate and dispatch
+		if s.OnOrderUpdate != nil {
+			for _, order := range syncData.Orders {
+				s.OnOrderUpdate(order)
+			}
+		}
+		if s.OnPositionUpdate != nil {
+			for _, pos := range syncData.Positions {
+				s.OnPositionUpdate(pos)
+			}
+		}
+		return
+	}
+
+	// Fallback: If it's not the standard sync object, pass generic data
+	// (Though user/syncrequest usually follows that structure)
+	if s.OnOrderUpdate != nil {
+		s.OnOrderUpdate(data)
+	}
+	if s.OnPositionUpdate != nil {
+		s.OnPositionUpdate(data)
 	}
 }
 
@@ -125,7 +200,7 @@ func (s *DataSubscriber) SubscribeQuote(symbol interface{}) error {
 		"symbol": symbol,
 	}
 
-	if err := s.client.Send("md/subscribeQuote", body); err != nil {
+	if err := s.client.Send("md/subscribequote", body); err != nil {
 		return err
 	}
 
@@ -146,7 +221,7 @@ func (s *DataSubscriber) UnsubscribeQuote(symbol interface{}) error {
 		"symbol": symbol,
 	}
 
-	if err := s.client.Send("md/unsubscribeQuote", body); err != nil {
+	if err := s.client.Send("md/unsubscribequote", body); err != nil {
 		return err
 	}
 
@@ -206,10 +281,12 @@ func (s *DataSubscriber) UnsubscribeChart(symbol interface{}) error {
 	return nil
 }
 
-func (s *DataSubscriber) SubscribeUserSyncRequests() error {
-	body := map[string]interface{}{}
+func (s *DataSubscriber) SubscribeUserSyncRequests(users []int) error {
+	body := map[string]interface{}{
+		"users": users,
+	}
 
-	if err := s.client.Send("user/syncRequest", body); err != nil {
+	if err := s.client.Send("user/syncrequest", body); err != nil {
 		return err
 	}
 

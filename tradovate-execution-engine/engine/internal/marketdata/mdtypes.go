@@ -84,6 +84,9 @@ const (
 	EventMarketData = "md"
 	EventChart      = "chart"
 	EventUser       = "user/syncrequest"
+	EventOrder      = "order"
+	EventPosition   = "position"
+	EventProps      = "props"
 )
 
 // Subscription types

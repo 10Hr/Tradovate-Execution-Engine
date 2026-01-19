@@ -60,7 +60,7 @@ func (m *MACrossover) checkSignal(lookback int) (Position, bool) {
 	} else if m.CrossBelow(lookback) {
 		if m.position == Flat {
 			m.position = Short
-			//execution.SubmitMarketOrder(symbol, execution.SideSell, 1)
+			//execution.SubmitMarketOrder(m.Symbol, execution.SideSell, 1)
 			return Short, true
 		}
 		if m.position == Long {

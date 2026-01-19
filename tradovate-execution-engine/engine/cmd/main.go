@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
+	"os"
 	"tradovate-execution-engine/engine/UI"
 	"tradovate-execution-engine/engine/config"
 	"tradovate-execution-engine/engine/internal/api"
@@ -18,13 +18,16 @@ import (
 
 const (
 	symbol     = "MESH6"
-	configFile = "config.json"
+	configFile = "config/config.json"
 )
 
 func main() {
 
 	mainLog := logger.NewLogger(500)
 	orderLog := logger.NewLogger(500)
+
+	// Ensure config directory exists
+	_ = os.MkdirAll("config", 0755)
 
 	// Initialize Config for OrderManager
 	execConfig := execution.DefaultConfig()
@@ -156,10 +159,10 @@ func main() {
 	// Set up composite event routing for both market data and account updates
 
 	// Connect
-	wsClient.Connect()
-
-	// Wait for connection to be established
-	time.Sleep(2 * time.Second)
+	if err := wsClient.Connect(); err != nil {
+		fmt.Printf("Connection error: %v\n", err)
+		return
+	}
 
 	// Subscribe to market data
 	subscriber.SubscribeQuote(symbol)

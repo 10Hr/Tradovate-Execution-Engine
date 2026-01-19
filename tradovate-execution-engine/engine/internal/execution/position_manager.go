@@ -1,209 +1,296 @@
 package execution
 
 import (
-	"sync"
-	"time"
+	"encoding/json"
+	"fmt"
 
 	"tradovate-execution-engine/engine/internal/logger"
+	"tradovate-execution-engine/engine/internal/marketdata"
 )
 
-// PositionTracker tracks the current position
-type PositionTracker struct {
-	mu       sync.RWMutex
-	position *Position
-	log      *logger.Logger
-}
-
-// NewPositionTracker creates a new position tracker
-func NewPositionTracker(symbol string, log *logger.Logger) *PositionTracker {
-	return &PositionTracker{
-		position: &Position{
-			Symbol:        symbol,
-			Quantity:      0,
-			EntryPrice:    0,
-			CurrentPrice:  0,
-			UnrealizedPnL: 0,
-			RealizedPnL:   0,
-			OpenedAt:      time.Time{},
-			LastUpdated:   time.Now(),
-		},
-		log: log,
+// NewPositionManager creates a new position manager
+func NewPositionManager(client, mdClient marketdata.WebSocketSender, userID int) *PositionManager {
+	return &PositionManager{
+		client:      client,
+		mdClient:    mdClient,
+		pls:         make(map[string]*PositionPL),
+		contractMap: make(map[int]string),
+		productMap:  make(map[string]float64),
+		userID:      userID,
 	}
 }
 
-// UpdatePositionFromAPI updates the position state from external API data
-func (pt *PositionTracker) UpdatePositionFromAPI(quantity int, avgPrice float64, realizedPnL float64) {
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
-
-	pt.position.Quantity = quantity
-	pt.position.EntryPrice = avgPrice
-	pt.position.RealizedPnL = realizedPnL // If we can get this from API
-	
-	// If quantity is 0, ensure we are flat
-	if quantity == 0 {
-		pt.position.EntryPrice = 0
-		pt.position.OpenedAt = time.Time{}
-	}
-
-	pt.updateUnrealizedPnL()
-	pt.log.Infof("Position synced from API: %d @ %.2f, Realized: %.2f", quantity, avgPrice, realizedPnL)
+// SetLogger sets the logger for the position manager
+func (pm *PositionManager) SetLogger(l *logger.Logger) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.log = l
 }
 
-// UpdateFill updates position based on a fill and returns the realized PnL from this fill
-func (pt *PositionTracker) UpdateFill(fill *Fill, side OrderSide) float64 {
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
-
-	pt.log.Infof("Processing fill: %s %d @ %.2f", side, fill.Quantity, fill.Price)
-
-	fillQty := fill.Quantity
-	if side == SideSell {
-		fillQty = -fillQty
+// Start begins tracking positions and P&L
+func (pm *PositionManager) Start() error {
+	body := map[string]interface{}{
+		"users": []int{pm.userID},
 	}
 
-	var realizedPnL float64
+	if err := pm.client.Send("user/syncrequest", body); err != nil {
+		return fmt.Errorf("failed to send user sync request: %w", err)
+	}
 
-	// Check if this is closing or reducing a position
-	if pt.position.Quantity != 0 &&
-		((pt.position.Quantity > 0 && fillQty < 0) ||
-			(pt.position.Quantity < 0 && fillQty > 0)) {
+	if pm.log != nil {
+		pm.log.Info("Position manager started - awaiting user sync data")
+	}
 
-		// Calculate realized PnL
-		closingQty := min(abs(pt.position.Quantity), abs(fillQty))
-		pnlPerContract := fill.Price - pt.position.EntryPrice
-		if pt.position.Quantity < 0 {
-			pnlPerContract = -pnlPerContract
+	return nil
+}
+
+// HandleUserSyncEvent processes the user sync response
+func (pm *PositionManager) HandleUserSyncEvent(data json.RawMessage) {
+	var syncData UserSyncData
+	if err := json.Unmarshal(data, &syncData); err != nil {
+		if pm.log != nil {
+			pm.log.Errorf("Failed to unmarshal user sync data: %v", err)
 		}
-		realizedPnL = pnlPerContract * float64(closingQty)
-		pt.position.RealizedPnL += realizedPnL
-
-		pt.log.Infof("Position reduced/closed. Realized PnL: $%.2f", realizedPnL)
-	}
-
-	// Update position quantity
-	oldQty := pt.position.Quantity
-	pt.position.Quantity += fillQty
-
-	// Update entry price for new or increased positions
-	if (oldQty == 0 && pt.position.Quantity != 0) ||
-		(oldQty > 0 && fillQty > 0) ||
-		(oldQty < 0 && fillQty < 0) {
-
-		// Calculate weighted average entry price
-		if oldQty == 0 {
-			pt.position.EntryPrice = fill.Price
-			pt.position.OpenedAt = fill.Timestamp
-		} else {
-			totalCost := (pt.position.EntryPrice * float64(abs(oldQty))) +
-				(fill.Price * float64(abs(fillQty)))
-			pt.position.EntryPrice = totalCost / float64(abs(pt.position.Quantity))
-		}
-	}
-
-	// If position is now flat, reset entry price
-	if pt.position.Quantity == 0 {
-		pt.position.EntryPrice = 0
-		pt.position.OpenedAt = time.Time{}
-		pt.log.Info("Position is now flat")
-	}
-
-	pt.position.CurrentPrice = fill.Price
-	pt.position.LastUpdated = fill.Timestamp
-
-	pt.updateUnrealizedPnL()
-	pt.logPosition()
-
-	return realizedPnL
-}
-
-// UpdatePrice updates the current market price and recalculates PnL
-func (pt *PositionTracker) UpdatePrice(price float64) {
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
-
-	pt.position.CurrentPrice = price
-	pt.position.LastUpdated = time.Now()
-	pt.updateUnrealizedPnL()
-}
-
-// updateUnrealizedPnL calculates unrealized PnL (must be called with lock held)
-func (pt *PositionTracker) updateUnrealizedPnL() {
-	if pt.position.Quantity == 0 {
-		pt.position.UnrealizedPnL = 0
 		return
 	}
 
-	if pt.position.CurrentPrice == 0 {
-		pt.position.UnrealizedPnL = 0
+	// Initial response contains positions, contracts, and products
+	if len(syncData.Users) > 0 {
+		pm.processInitialSync(syncData)
+	}
+}
+
+// processInitialSync handles the initial user sync response
+func (pm *PositionManager) processInitialSync(syncData UserSyncData) {
+	if pm.log != nil {
+		pm.log.Infof("Received initial sync - Positions: %d, Contracts: %d, Products: %d",
+			len(syncData.Positions), len(syncData.Contracts), len(syncData.Products))
+	}
+
+	pm.mu.Lock()
+	// Populate lookup maps
+	for _, contract := range syncData.Contracts {
+		pm.contractMap[contract.ID] = contract.Name
+	}
+
+	for _, product := range syncData.Products {
+		pm.productMap[product.Name] = product.ValuePerPoint
+	}
+	pm.mu.Unlock()
+
+	// Process each position
+	for _, pos := range syncData.Positions {
+		// Skip if no position
+		if pos.NetPos == 0 && pos.PrevPos == 0 {
+			continue
+		}
+
+		pm.mu.RLock()
+		// Get contract name
+		contractName, ok := pm.contractMap[pos.ContractID]
+		if !ok {
+			if pm.log != nil {
+				pm.log.Warnf("Contract ID %d not found in contracts", pos.ContractID)
+			}
+			pm.mu.RUnlock()
+			continue
+		}
+
+		// Find matching product (products.name starts with contract name)
+		var valuePerPoint float64
+		for productName, vpp := range pm.productMap {
+			if len(productName) >= len(contractName) && productName[:len(contractName)] == contractName {
+				valuePerPoint = vpp
+				break
+			}
+		}
+		pm.mu.RUnlock()
+
+		if valuePerPoint == 0 {
+			if pm.log != nil {
+				pm.log.Warnf("Value per point not found for contract %s", contractName)
+			}
+			continue
+		}
+
+		// Subscribe to market data for this position
+		pm.subscribeToPosition(contractName, pos, valuePerPoint)
+	}
+}
+
+// subscribeToPosition subscribes to market data for a position
+func (pm *PositionManager) subscribeToPosition(contractName string, pos Position, valuePerPoint float64) {
+	body := map[string]interface{}{
+		"symbol": contractName,
+	}
+
+	if err := pm.mdClient.Send("md/subscribequote", body); err != nil {
+		if pm.log != nil {
+			pm.log.Errorf("Failed to subscribe to quotes for %s: %v", contractName, err)
+		}
 		return
 	}
 
-	pnlPerContract := pt.position.CurrentPrice - pt.position.EntryPrice
-	if pt.position.Quantity < 0 {
-		pnlPerContract = -pnlPerContract
+	if pm.log != nil {
+		pm.log.Infof("Subscribed to market data for %s (NetPos: %d, NetPrice: %.2f, VPP: %.2f)",
+			contractName, pos.NetPos, pos.NetPrice, valuePerPoint)
 	}
-	pt.position.UnrealizedPnL = pnlPerContract * float64(abs(pt.position.Quantity))
+
+	// Store position info for quote processing
+	pm.mu.Lock()
+	pm.pls[contractName] = &PositionPL{
+		Name:          contractName,
+		NetPos:        pos.NetPos,
+		AvgPrice:      pos.NetPrice,
+		ValuePerPoint: valuePerPoint,
+	}
+	pm.mu.Unlock()
 }
 
-// GetPosition returns a copy of the current position
-func (pt *PositionTracker) GetPosition() Position {
-	pt.mu.RLock()
-	defer pt.mu.RUnlock()
-	return *pt.position
+// HandleQuoteUpdate processes quote updates and calculates P&L
+func (pm *PositionManager) HandleQuoteUpdate(quote marketdata.Quote) {
+	// Find position for this contract
+	pm.mu.RLock()
+	contractName, ok := pm.contractMap[quote.ContractID]
+	if !ok {
+		pm.mu.RUnlock()
+		return
+	}
+	positionPL, exists := pm.pls[contractName]
+	pm.mu.RUnlock()
+
+	if !exists {
+		// No position tracking for this symbol
+		return
+	}
+
+	// Get the Trade entry from the quote
+	trade, ok := quote.Entries["Trade"]
+	if !ok {
+		// No trade price available yet
+		return
+	}
+
+	pm.calculateAndUpdatePL(contractName, trade.Price, positionPL.NetPos)
 }
 
-// GetQuantity returns the current position quantity
-func (pt *PositionTracker) GetQuantity() int {
-	pt.mu.RLock()
-	defer pt.mu.RUnlock()
-	return pt.position.Quantity
-}
+// calculateAndUpdatePL calculates and updates P&L for a position
+func (pm *PositionManager) calculateAndUpdatePL(name string, currentPrice float64, netPos int) {
+	pm.mu.Lock()
+	positionPL, exists := pm.pls[name]
+	if !exists {
+		pm.mu.Unlock()
+		return
+	}
 
-// IsFlat returns true if position is flat
-func (pt *PositionTracker) IsFlat() bool {
-	pt.mu.RLock()
-	defer pt.mu.RUnlock()
-	return pt.position.Quantity == 0
-}
-
-// Reset resets the position to flat
-func (pt *PositionTracker) Reset() {
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
-
-	pt.position.Quantity = 0
-	pt.position.EntryPrice = 0
-	pt.position.CurrentPrice = 0
-	pt.position.UnrealizedPnL = 0
-	pt.position.RealizedPnL = 0
-	pt.position.OpenedAt = time.Time{}
-	pt.position.LastUpdated = time.Now()
-
-	pt.log.Info("Position tracker reset")
-}
-
-// logPosition logs the current position state
-func (pt *PositionTracker) logPosition() {
-	if pt.position.Quantity == 0 {
-		pt.log.Info("Position: FLAT")
+	if netPos == 0 {
+		positionPL.PL = 0
 	} else {
-		direction := "LONG"
-		if pt.position.Quantity < 0 {
-			direction = "SHORT"
-		}
-		pt.log.Infof("Position: %s %d @ %.2f | Unrealized PnL: $%.2f | Realized PnL: $%.2f",
-			direction,
-			abs(pt.position.Quantity),
-			pt.position.EntryPrice,
-			pt.position.UnrealizedPnL,
-			pt.position.RealizedPnL)
+		// P&L = (Current - Entry) * Qty * VPP
+		positionPL.PL = (currentPrice - positionPL.AvgPrice) * float64(netPos) * positionPL.ValuePerPoint
+	}
+
+	currentPL := positionPL.PL
+	pm.mu.Unlock()
+
+	if pm.log != nil {
+		pm.log.Debugf("P&L Update - %s: $%.2f (Price: %.2f, Pos: %d)",
+			name, currentPL, currentPrice, netPos)
+	}
+
+	// Call update callback
+	if pm.OnPLUpdate != nil {
+		pm.OnPLUpdate(name, currentPL, netPos)
+	}
+
+	// Calculate total P&L
+	pm.runPL()
+}
+
+// runPL calculates and reports total P&L across all positions
+func (pm *PositionManager) runPL() {
+	totalPL := 0.0
+	for _, positionPL := range pm.pls {
+		totalPL += positionPL.PL
+	}
+
+	if pm.log != nil {
+		pm.log.Infof("Total P&L: $%.2f", totalPL)
+	}
+
+	// Call total P&L callback
+	if pm.OnTotalPLUpdate != nil {
+		pm.OnTotalPLUpdate(totalPL)
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
+// GetPositionPL returns the P&L for a specific position
+func (pm *PositionManager) GetPositionPL(name string) (float64, bool) {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	if positionPL, exists := pm.pls[name]; exists {
+		return positionPL.PL, true
 	}
-	return b
+	return 0, false
+}
+
+// GetTotalPL returns the total P&L across all positions
+func (pm *PositionManager) GetTotalPL() float64 {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	totalPL := 0.0
+	for _, positionPL := range pm.pls {
+		totalPL += positionPL.PL
+	}
+	return totalPL
+}
+
+// GetAllPositions returns a copy of all position P&Ls
+func (pm *PositionManager) GetAllPositions() map[string]PositionPL {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	positions := make(map[string]PositionPL)
+	for name, positionPL := range pm.pls {
+		positions[name] = *positionPL
+	}
+	return positions
+}
+
+// HandlePositionUpdate processes real-time position updates
+func (pm *PositionManager) HandlePositionUpdate(pos APIPosition) {
+	pm.mu.RLock()
+	contractName, ok := pm.contractMap[pos.ContractID]
+	pm.mu.RUnlock()
+
+	if !ok {
+		if pm.log != nil {
+			pm.log.Warnf("HandlePositionUpdate: Contract ID %d not found", pos.ContractID)
+		}
+		return
+	}
+
+	pm.mu.Lock()
+	// Update existing position
+	if positionPL, exists := pm.pls[contractName]; exists {
+		positionPL.NetPos = pos.NetPos
+		positionPL.AvgPrice = pos.NetPrice
+
+		// Realized PnL Calculation from API
+		// Cash Flow = SoldValue - BoughtValue
+		// Cost of Open Position = NetPos * NetPrice
+		// Realized PnL = Cash Flow + Cost of Open Position
+		realizedPnLPoints := (pos.SoldValue - pos.BoughtValue) + (float64(pos.NetPos) * pos.NetPrice)
+		positionPL.RealizedPL = realizedPnLPoints * positionPL.ValuePerPoint
+
+		if pm.log != nil {
+			pm.log.Infof("Updated position %s: NetPos=%d, AvgPrice=%.2f, RealizedPL=%.2f",
+				contractName, pos.NetPos, pos.NetPrice, positionPL.RealizedPL)
+		}
+		pm.mu.Unlock()
+		return
+	}
+	pm.mu.Unlock()
 }

@@ -1,6 +1,7 @@
 package UI
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,8 @@ import (
 	"tradovate-execution-engine/engine/internal/execution"
 	"tradovate-execution-engine/engine/internal/logger"
 
+	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -85,6 +88,7 @@ type mode int
 const (
 	modeNormal mode = iota
 	modeCommand
+	modeEditor
 )
 
 type Position struct {
@@ -129,6 +133,8 @@ type model struct {
 	mode                 mode
 	tradingMode          TradingMode
 	commandInput         string
+	commandHistory       []string
+	historyIndex         int
 	searchInput          string
 	statusMsg            string
 	errorMsg             string
@@ -138,6 +144,11 @@ type model struct {
 	scrollOffset         int
 	logScrollOffset      int
 	orderLogScrollOffset int
+
+	// Editor
+	configEditor textarea.Model
+	isLogView    bool
+	editorTitle  string
 
 	// Logger
 	mainLogger  *logger.Logger
@@ -162,12 +173,14 @@ type model struct {
 	currentSymbol string
 
 	// Order Manager
-	orderManager *execution.OrderManager
+	orderManager    *execution.OrderManager
+	positionManager *execution.PositionManager
 
 	// Market Data & Auth
-	wsClient     *api.TradovateWebSocketClient
-	userSync     *api.TradovateWebSocketClient
-	mdSubscriber *api.DataSubscriber
+	wsClient          *api.TradovateWebSocketClient
+	userSync          *api.TradovateWebSocketClient
+	mdSubscriber      *api.DataSubscriber
+	tradingSubscriber *api.DataSubscriber
 }
 
 func InitialModel(mainLog, orderLog *logger.Logger, om *execution.OrderManager) model {
@@ -186,29 +199,30 @@ func InitialModel(mainLog, orderLog *logger.Logger, om *execution.OrderManager) 
 	// Configure singleton TokenManager with logger
 	auth.GetTokenManager().SetLogger(mainLog)
 
-	// Get initial symbol from OrderManager if possible
-	symbol := "MESH6" // Default
-	if om != nil {
-		pos := om.GetPosition()
-		if pos.Symbol != "" {
-			symbol = pos.Symbol
-		}
-	}
+	symbol := "MESH6"
+
+	// Initialize Editor
+	ta := textarea.New()
+	ta.Placeholder = "Config content..."
+	ta.Focus()
 
 	return model{
-		activeTab:     TabMain,
-		mode:          modeNormal,
-		tradingMode:   ModeVisual,
-		connected:     false,
-		totalPnL:      0,
-		mainLogger:    mainLog,
-		orderLogger:   orderLog,
-		orderManager:  om,
-		configPath:    "config.json",
-		strategyName:  "No strategy selected",
-		currentSymbol: symbol,
+		activeTab:            TabMain,
+		mode:                 modeNormal,
+		tradingMode:          ModeVisual,
+		connected:            false,
+		totalPnL:             0,
+		mainLogger:           mainLog,
+		orderLogger:          orderLog,
+		orderManager:         om,
+		configPath:           "config/config.json",
+		strategyName:         "No strategy selected",
+		currentSymbol:        symbol,
 		logScrollOffset:      1000000,
 		orderLogScrollOffset: 1000000,
+		commandHistory:       []string{},
+		historyIndex:         0,
+		configEditor:         ta,
 
 		// Empty data - will be populated from OrderManager
 		positions:  []Position{},
@@ -248,8 +262,10 @@ type connMsg struct {
 }
 
 type connMsgSuccess struct {
-	client     *api.TradovateWebSocketClient
-	subscriber *api.DataSubscriber
+	mdClient          *api.TradovateWebSocketClient
+	mdSubscriber      *api.DataSubscriber
+	tradingClient     *api.TradovateWebSocketClient
+	tradingSubscriber *api.DataSubscriber
 }
 
 type editorFinishedMsg struct {
@@ -299,22 +315,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.orders = uiOrders
 
 			// Update Positions
-			execPos := m.orderManager.GetPosition()
-			if execPos.Quantity != 0 {
-				m.positions = []Position{{
-					Symbol:   execPos.Symbol,
-					Quantity: execPos.Quantity,
-					AvgPrice: execPos.EntryPrice,
-					PnL:      execPos.UnrealizedPnL,
-				}}
-			} else {
-				m.positions = []Position{}
-			}
+			if m.positionManager != nil {
+				pmPositions := m.positionManager.GetAllPositions()
+				var uiPositions []Position
+				var unrealizedTotal float64
 
-			// Update PnL
-			m.realizedPnL = m.orderManager.GetDailyPnL()
-			m.unrealizedPnL = execPos.UnrealizedPnL
-			m.totalPnL = m.realizedPnL + m.unrealizedPnL
+				for name, p := range pmPositions {
+					if p.NetPos != 0 {
+						uiPositions = append(uiPositions, Position{
+							Symbol:   name,
+							Quantity: p.NetPos,
+							AvgPrice: p.AvgPrice,
+							PnL:      p.PL,
+						})
+					}
+					unrealizedTotal += p.PL
+				}
+				m.positions = uiPositions
+				m.unrealizedPnL = unrealizedTotal
+
+				// Get realized PnL from OrderManager
+				if m.orderManager != nil {
+					m.realizedPnL = m.orderManager.GetDailyPnL()
+				}
+				m.totalPnL = m.realizedPnL + m.unrealizedPnL
+			} else if m.orderManager != nil {
+				execPos := m.orderManager.GetPosition()
+				if execPos.NetPos != 0 {
+					m.positions = []Position{{
+						Symbol:   execPos.Name,
+						Quantity: execPos.NetPos,
+						AvgPrice: execPos.AvgPrice,
+						PnL:      execPos.PL,
+					}}
+				} else {
+					m.positions = []Position{}
+				}
+
+				// Update PnL
+				m.realizedPnL = m.orderManager.GetDailyPnL()
+				m.unrealizedPnL = execPos.PL
+				m.totalPnL = m.realizedPnL + m.unrealizedPnL
+			}
 
 			// Update PnL History (simple version: append every tick if changed or every X seconds)
 			now := time.Now()
@@ -357,20 +399,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case connMsgSuccess:
-		m.wsClient = msg.client
-		m.mdSubscriber = msg.subscriber
+		m.wsClient = msg.mdClient
+		m.mdSubscriber = msg.mdSubscriber
+		m.userSync = msg.tradingClient
+		m.tradingSubscriber = msg.tradingSubscriber
 		m.connected = true
 
-		// Start Trading Stream
-		// if m.orderManager != nil {
-		// 	if err := m.orderManager.StartTradingStream(m.tradingClient); err != nil {
-		// 		m.mainLogger.Errorf("Failed to start trading stream: %v", err)
-		// 	} else {
-		// 		m.mainLogger.Info("Trading stream started")
-		// 	}
-		// }
-
-		m.mainLogger.Println(">>> CONNECTION SUCCESSFUL & READY <<<")
+		m.mainLogger.Println(">>> CONNECTION SUCCESSFUL <<<")
 		m.statusMsg = successStyle.Render("Connected to Tradovate")
 		return m, nil
 
@@ -401,6 +436,8 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleNormalMode(msg)
 	case modeCommand:
 		return m.handleCommandMode(msg)
+	case modeEditor:
+		return m.handleEditorMode(msg)
 	}
 
 	return m, nil
@@ -472,7 +509,7 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				_ = m.wsClient.Disconnect()
 				m.wsClient = nil
 			}
-			m.mainLogger.Println(">>> DISCONNECTED <<<")
+			m.mainLogger.Println(">>> SUCCESSFULLY DISCONNECTED <<<")
 			return m, nil
 		} else {
 			m.mainLogger.Println(">>> STARTING CONNECTION SEQUENCE... <<<")
@@ -480,11 +517,19 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Check if config exists
 			if _, err := os.Stat(m.configPath); os.IsNotExist(err) {
 				m.mainLogger.Println("Config not found. Creating default and opening editor...")
+				_ = os.MkdirAll("config", 0755)
 				if err := config.CreateDefaultConfig(m.configPath); err != nil {
 					m.mainLogger.Errorf("Failed to create config: %v", err)
 					return m, nil
 				}
-				return m, openEditor(m.configPath, "connect")
+
+				// Open editor instead of trying to open external notepad
+				content, _ := os.ReadFile(m.configPath)
+				m.configEditor.SetValue(string(content))
+				m.configEditor.SetWidth(m.width - 4)
+				m.configEditor.SetHeight(m.height - 10)
+				m.mode = modeEditor
+				return m, nil
 			}
 
 			return m, m.connectCmd()
@@ -514,12 +559,38 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.statusMsg = "Enter strategy name..."
 
 	case "$": // Shift+4
-		m.mainLogger.Println(">>> EXPORTING MAIN LOG... <<<")
-		m.logScrollOffset = 1000000
+		m.mainLogger.Println(">>> EXPORTING MAIN LOG TO FILE... <<<")
+		content := m.mainLogger.ExportToString()
+		_ = os.MkdirAll("../../external/logs", 0755)
+		filename := "../../external/logs/main_log_" + time.Now().Format("20060102_150405") + ".txt"
+		err := os.WriteFile(filename, []byte(content), 0644)
+		if err != nil {
+			m.errorMsg = "Export failed: " + err.Error()
+			m.mainLogger.Errorf("Export failed: %v", err)
+		} else {
+			m.statusMsg = successStyle.Render("Log exported to " + filename)
+			m.mainLogger.Printf("Log successfully exported to %s", filename)
+		}
 
 	case "%": // Shift+5
-		m.mainLogger.Printf(">>> CONFIG EDITOR OPENING: %s <<<", m.configPath)
-		m.logScrollOffset = 1000000
+		content, err := os.ReadFile(m.configPath)
+		if err != nil {
+			// Try to create it if it doesn't exist
+			if os.IsNotExist(err) {
+				_ = os.MkdirAll("config", 0755)
+				_ = config.CreateDefaultConfig(m.configPath)
+				content, _ = os.ReadFile(m.configPath)
+			} else {
+				m.errorMsg = "Failed to read config: " + err.Error()
+				return m, nil
+			}
+		}
+		m.configEditor.SetValue(string(content))
+		m.configEditor.SetWidth(m.width - 4)
+		m.configEditor.SetHeight(m.height - 10)
+		m.mode = modeEditor
+		m.statusMsg = "Editing config. Press Ctrl+S to save, ESC to exit"
+		m.mainLogger.Printf(">>> CONFIG EDITOR OPENED: %s <<<", m.configPath)
 
 	case "^": // Shift+6
 		m.mainLogger.Clear()
@@ -733,11 +804,35 @@ func (m model) handleCommandMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.errorMsg = ""
 
 	case tea.KeyEnter:
+		// Save to history if not empty and not identical to last entry
+		rawCmd := strings.TrimPrefix(m.commandInput, ":")
+		if rawCmd != "" {
+			if len(m.commandHistory) == 0 || m.commandHistory[len(m.commandHistory)-1] != rawCmd {
+				m.commandHistory = append(m.commandHistory, rawCmd)
+			}
+		}
+		m.historyIndex = len(m.commandHistory)
+
 		var cmd tea.Cmd
 		m, cmd = m.executeCommand()
 		m.mode = modeNormal
 		m.commandInput = ""
 		return m, cmd
+
+	case tea.KeyUp:
+		if m.historyIndex > 0 {
+			m.historyIndex--
+			m.commandInput = ":" + m.commandHistory[m.historyIndex]
+		}
+
+	case tea.KeyDown:
+		if m.historyIndex < len(m.commandHistory)-1 {
+			m.historyIndex++
+			m.commandInput = ":" + m.commandHistory[m.historyIndex]
+		} else if m.historyIndex == len(m.commandHistory)-1 {
+			m.historyIndex = len(m.commandHistory)
+			m.commandInput = ":"
+		}
 
 	case tea.KeyBackspace:
 		if len(m.commandInput) > 1 {
@@ -753,7 +848,108 @@ func (m model) handleCommandMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *model) handleEditorMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.isLogView {
+		switch msg.Type {
+		case tea.KeyCtrlE:
+			// Export to file
+			content := m.configEditor.Value()
+			filename := "exported_log_" + time.Now().Format("20060102_150405") + ".txt"
+			err := os.WriteFile(filename, []byte(content), 0644)
+			if err != nil {
+				m.statusMsg = errorStyle.Render("Export failed: " + err.Error())
+			} else {
+				m.statusMsg = successStyle.Render("Log exported to " + filename)
+			}
+			return *m, nil
+
+		case tea.KeyCtrlC:
+			err := clipboard.WriteAll(m.configEditor.Value())
+			if err == nil {
+				m.statusMsg = "Copied all log text to clipboard"
+			}
+			return *m, nil
+
+		case tea.KeyCtrlV:
+			text, err := clipboard.ReadAll()
+			if err == nil {
+				m.configEditor.InsertString(text)
+				m.statusMsg = "Pasted into log view"
+			}
+			return *m, nil
+
+		case tea.KeyCtrlA:
+			m.configEditor.SetCursor(len(m.configEditor.Value()))
+			m.statusMsg = "Cursor moved to end of log"
+			return *m, nil
+
+		case tea.KeyEsc:
+			m.mode = modeNormal
+			m.isLogView = false
+			m.statusMsg = "" // Reset status
+			return *m, nil
+		}
+		// In log view, we don't allow typing other than the specific shortcuts
+		return *m, nil
+	}
+
+	// Config Editor Logic
+	switch msg.Type {
+	case tea.KeyCtrlS:
+		// Save content
+		err := os.WriteFile(m.configPath, []byte(m.configEditor.Value()), 0644)
+		if err != nil {
+			m.errorMsg = "Failed to save config: " + err.Error()
+			m.mainLogger.Errorf("Save failed: %v", err)
+		} else {
+			m.statusMsg = successStyle.Render("Config saved successfully")
+			m.mainLogger.Info("Config saved via integrated editor")
+		}
+		return *m, nil
+
+	case tea.KeyCtrlC:
+		err := clipboard.WriteAll(m.configEditor.Value())
+		if err == nil {
+			m.statusMsg = "Copied all text to clipboard"
+		}
+		return *m, nil
+
+	case tea.KeyCtrlV:
+		text, err := clipboard.ReadAll()
+		if err == nil {
+			m.configEditor.InsertString(text)
+			m.statusMsg = "Pasted from clipboard"
+		}
+		return *m, nil
+
+	case tea.KeyCtrlA:
+		m.configEditor.SetCursor(len(m.configEditor.Value()))
+		m.statusMsg = "Cursor moved to end of text"
+		return *m, nil
+
+	case tea.KeyEsc:
+		m.mode = modeNormal
+		m.statusMsg = "" // Reset status
+		return *m, nil
+
+	case tea.KeyRunes:
+		if msg.String() == ":" {
+			m.mode = modeCommand
+			m.commandInput = ":"
+			return *m, nil
+		}
+	}
+
+	var cmd tea.Cmd
+	m.configEditor, cmd = m.configEditor.Update(msg)
+	return *m, cmd
+}
+
 func (m model) executeCommand() (model, tea.Cmd) {
+	// Force scroll to bottom when a command is executed
+	m.logScrollOffset = 1000000
+	m.orderLogScrollOffset = 1000000
+
 	cmd := strings.TrimPrefix(m.commandInput, ":")
 	parts := strings.Fields(cmd)
 
@@ -869,36 +1065,78 @@ func (m model) executeCommand() (model, tea.Cmd) {
 			m.errorMsg = "Invalid mode. Use l for'live' or v for 'visual'"
 		}
 
-	case "config":
-		m.statusMsg = "Opening config editor..."
-		m.mainLogger.Printf("Opening config file: %s", m.configPath)
-		return m, openEditor(m.configPath, "none")
+	// case "buy", "sell", "cancel", "flatten", "mode", "strategy", "export", "main", "om", "pos", "orders", "help":
+	// 	// Check if we are in a mode that should block these commands
+	// 	// Note: We can't easily check 'previous mode' here without a state change,
+	// 	// but we can check if the editor is currently active or if we want to block
+	// 	// these specific commands while the editor *would* be the background state.
+	// 	// However, a simpler way is to just handle the commands as requested.
 
-	case "strategy":
-		if !m.connected {
-			m.errorMsg = "Must be connected to API to select strategy"
+	case "config":
+		content, err := os.ReadFile(m.configPath)
+		if err != nil {
+			m.errorMsg = "Failed to read config: " + err.Error()
 			return m, nil
 		}
-		if len(parts) < 2 {
-			m.errorMsg = "Usage: :strategy <name>"
-			return m, nil
+		m.isLogView = false
+		m.editorTitle = "CONFIG EDITOR"
+		m.configEditor.SetValue(string(content))
+		m.configEditor.SetWidth(m.width - 4)
+		m.configEditor.SetHeight(m.height - 10)
+		m.mode = modeEditor
+		m.statusMsg = "Editing config. Press Ctrl+S to save, ESC to exit, or : to run commands"
+		return m, nil
+
+	case "w", "write":
+		if m.configEditor.Value() != "" && !m.isLogView {
+			err := os.WriteFile(m.configPath, []byte(m.configEditor.Value()), 0644)
+			if err != nil {
+				m.errorMsg = "Failed to save config: " + err.Error()
+			} else {
+				m.statusMsg = successStyle.Render("Config saved")
+			}
 		}
-		m.strategyName = parts[1]
-		m.statusMsg = successStyle.Render(fmt.Sprintf("Strategy set to: %s", m.strategyName))
-		m.mainLogger.Printf("Strategy selected: %s", m.strategyName)
+		return m, nil
+
+	case "x":
+		// Save and exit
+		if m.configEditor.Value() != "" && !m.isLogView {
+			_ = os.WriteFile(m.configPath, []byte(m.configEditor.Value()), 0644)
+		}
+		m.mode = modeNormal
+		m.isLogView = false
+		m.statusMsg = "" // Reset status
+		return m, nil
 
 	case "export":
 		if len(parts) < 2 {
 			m.errorMsg = "Usage: :export <log|orders>"
 			return m, nil
 		}
+		_ = os.MkdirAll("../../external/logs", 0755)
 		switch parts[1] {
-		case "log":
-			m.statusMsg = successStyle.Render("Main log exported to trading_log.txt")
-			m.mainLogger.Println("Main log exported")
+		case "log", "main":
+			content := m.mainLogger.ExportToString()
+			filename := "../../external/logs/main_log_" + time.Now().Format("20060102_150405") + ".txt"
+			err := os.WriteFile(filename, []byte(content), 0644)
+			if err != nil {
+				m.errorMsg = "Export failed: " + err.Error()
+			} else {
+				m.statusMsg = successStyle.Render("Log exported to " + filename)
+				m.mainLogger.Printf("Main log exported to %s", filename)
+			}
+			return m, nil
 		case "orders":
-			m.statusMsg = successStyle.Render("Order log exported to orders_log.txt")
-			m.mainLogger.Println("Order log exported")
+			content := m.orderLogger.ExportToString()
+			filename := "../../external/logs/orders_log_" + time.Now().Format("20060102_150405") + ".txt"
+			err := os.WriteFile(filename, []byte(content), 0644)
+			if err != nil {
+				m.errorMsg = "Export failed: " + err.Error()
+			} else {
+				m.statusMsg = successStyle.Render("Order log exported to " + filename)
+				m.mainLogger.Printf("Order log exported to %s", filename)
+			}
+			return m, nil
 		default:
 			m.errorMsg = "Invalid export target. Use 'log' or 'orders'"
 		}
@@ -974,6 +1212,17 @@ func (m model) renderTabs() string {
 
 func (m model) renderContent() string {
 	contentHeight := m.height - 5
+
+	if m.mode == modeEditor {
+		footer := "[Ctrl+S: Save | :w: Save | :x: Save & Exit | ESC: Cancel]"
+		if m.isLogView {
+			footer = "[Ctrl+E: Export to File | Ctrl+C: Copy | Ctrl+A: All | ESC: Exit]"
+		}
+		return contentStyle.
+			Width(m.width - 4).
+			Height(contentHeight).
+			Render(fmt.Sprintf("═══ %s ═══\n\n%s\n\n%s", m.editorTitle, m.configEditor.View(), footer))
+	}
 
 	var content string
 	switch m.activeTab {
@@ -1145,15 +1394,15 @@ func (m model) renderLogPanel(width, height int, title string, log *logger.Logge
 		availableLines = 1
 	}
 
-	// Calculate max scroll
 	maxScroll := len(entries) - availableLines
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
 
-	// Auto-scroll logic: If we were at the bottom (or past it), stay at the bottom
-	// We use a small buffer or just check if it was >= maxScroll before we updated maxScroll
-	if *scrollOffset >= maxScroll-1 {
+	// Improved Auto-scroll logic:
+	// If we were at the bottom (or very close), stay at the bottom even if many logs arrived.
+	// We use a 2-line threshold to allow for slight offsets.
+	if *scrollOffset >= maxScroll-2 {
 		*scrollOffset = maxScroll
 	}
 
@@ -1581,6 +1830,8 @@ func (m model) renderCommandBar() string {
 		if m.errorMsg != "" {
 			content += "  " + errorStyle.Render(m.errorMsg)
 		}
+	} else if m.mode == modeEditor {
+		content = "EDITOR: Type content, ':' for commands, 'Ctrl+S' to save, 'ESC' to exit"
 	} else {
 		if m.activeTab == TabCommands && m.searchActive {
 			content = "Searching... (Press ESC to exit search)"
@@ -1638,23 +1889,90 @@ func (m model) connectCmd() tea.Cmd {
 		// 4. Initialize WS Clients
 
 		// Market Data Client
-		client := api.NewTradovateWebSocketClient(mdToken, cfg.Tradovate.Environment)
-		client.SetLogger(m.mainLogger)
+		mdClient := api.NewTradovateWebSocketClient(mdToken, cfg.Tradovate.Environment)
+		mdClient.SetLogger(m.mainLogger)
 
 		// Trading Client
 		tradingClient := api.NewTradovateWebSocketClient(token, cfg.Tradovate.Environment)
 		tradingClient.SetLogger(m.mainLogger)
 
-		subscriber := api.NewDataSubscriber(client)
-		subscriber.SetLogger(m.mainLogger)
+		// Create Subscribers
+		mdSubscriber := api.NewDataSubscriber(mdClient)
+		mdSubscriber.SetLogger(m.mainLogger)
 
-		client.SetMessageHandler(subscriber.HandleEvent)
+		tradingSubscriber := api.NewDataSubscriber(tradingClient)
+		tradingSubscriber.SetLogger(m.mainLogger)
 
-		if err := client.Connect(); err != nil {
-			return connMsg{err: fmt.Errorf("ws connect error: %v", err)}
+		// Initialize PositionManager
+		userID := tm.GetUserID()
+		pm := execution.NewPositionManager(tradingClient, mdClient, userID)
+		pm.SetLogger(m.mainLogger)
+		m.positionManager = pm                // Assign to model
+		m.orderManager.SetPositionManager(pm) // Link to OrderManager
+
+		// Wire up OrderManager updates to TRADING subscriber
+		tradingSubscriber.OnPositionUpdate = func(data json.RawMessage) {
+			// Update OrderManager
+			var pos execution.APIPosition
+			if err := json.Unmarshal(data, &pos); err == nil {
+				m.orderManager.HandlePositionUpdate(pos)
+				// Update PositionManager
+				pm.HandlePositionUpdate(pos)
+			} else {
+				// Fallback or log error
+				m.mainLogger.Warnf("Failed to parse position update: %v", err)
+			}
 		}
 
+		// Wire up PositionManager events
+		tradingSubscriber.OnUserSync = pm.HandleUserSyncEvent
+		mdSubscriber.OnQuoteUpdate = pm.HandleQuoteUpdate
+
+		tradingSubscriber.OnOrderUpdate = func(data json.RawMessage) {
+			// Pass raw JSON to OrderManager, which handles parsing
+			m.orderManager.HandleRawOrderEvent(data)
+		}
+
+		// Connect Clients
+		mdClient.SetMessageHandler(mdSubscriber.HandleEvent)
+		tradingClient.SetMessageHandler(tradingSubscriber.HandleEvent)
+
+		// Connect Market Data
+		if err := mdClient.Connect(); err != nil {
+			return connMsg{err: fmt.Errorf("md ws connect error: %w", err)}
+		}
+
+		// Connect Trading
+		if err := tradingClient.Connect(); err != nil {
+			return connMsg{err: fmt.Errorf("trading ws connect error: %w", err)}
+		}
+
+		// Start PositionManager (this requests user sync)
+		// No need for sleep anymore since Connect() blocks until authorized
+		go func() {
+			if err := pm.Start(); err != nil {
+				m.mainLogger.Errorf("Failed to start PositionManager: %v", err)
+			}
+		}()
+
+		// Initial subscriptions
+		// go func() {
+		// 	// Give it a moment to authorize
+		// 	time.Sleep(1 * time.Second)
+
+		// 	//Get User ID for sync
+		// 	userID := tm.GetUserID()
+
+		// 	//Subscribe using the TRADING subscriber
+		// 	tradingSubscriber.SubscribeUserSyncRequests([]int{userID})
+		// }()
+
 		// Return success with objects
-		return connMsgSuccess{client: client, subscriber: subscriber}
+		return connMsgSuccess{
+			mdClient:          mdClient,
+			mdSubscriber:      mdSubscriber,
+			tradingClient:     tradingClient,
+			tradingSubscriber: tradingSubscriber,
+		}
 	}
 }
