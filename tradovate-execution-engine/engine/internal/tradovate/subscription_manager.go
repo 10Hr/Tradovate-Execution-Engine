@@ -1,28 +1,12 @@
-package api
+package tradovate
 
 import (
 	"encoding/json"
 	"fmt"
-	"sync"
 	"tradovate-execution-engine/engine/internal/logger"
 	"tradovate-execution-engine/engine/internal/marketdata"
 	//"tradovate-execution-engine/engine/internal/marketdata"
 )
-
-// DataSubscriber manages real-time market data subscriptions
-type DataSubscriber struct {
-	client        marketdata.WebSocketSender
-	subscriptions map[string]string
-	mu            sync.RWMutex
-	log           *logger.Logger
-
-	// Custom handlers
-	OnQuoteUpdate    func(quote marketdata.Quote)
-	OnChartUpdate    func(chart marketdata.ChartUpdate)
-	OnOrderUpdate    func(data json.RawMessage)
-	OnPositionUpdate func(data json.RawMessage)
-	OnUserSync       func(data json.RawMessage)
-}
 
 // NewDataSubscriber creates a new market data subscriber
 func NewDataSubscriber(client marketdata.WebSocketSender) *DataSubscriber {
@@ -47,6 +31,9 @@ func (s *DataSubscriber) HandleEvent(eventType string, data json.RawMessage) {
 	case marketdata.EventChart:
 		s.handleChartData(data)
 	case marketdata.EventUser:
+		if s.log != nil {
+			s.log.Infof("Event Received: %s", eventType)
+		}
 		// User sync often contains positions and orders
 		if s.OnUserSync != nil {
 			s.OnUserSync(data)
@@ -62,6 +49,11 @@ func (s *DataSubscriber) HandleEvent(eventType string, data json.RawMessage) {
 		}
 	case marketdata.EventProps:
 		s.handlePropsEvent(data)
+	case "md/subscribequote", "md/unsubscribequote", "md/subscribechart", "md/unsubscribechart":
+		// These are response confirmations for requests, ignore them to avoid "Unknown event type" warnings
+		if s.log != nil {
+			s.log.Debugf("Confirmation received for: %s", eventType)
+		}
 	default:
 		if s.log != nil {
 			s.log.Warnf("Unknown event type: %s", eventType)
@@ -138,21 +130,6 @@ func (s *DataSubscriber) handleMarketData(data json.RawMessage) {
 	}
 
 	for _, quote := range quoteData.Quotes {
-		if s.log != nil {
-			s.log.Debugf("Quote Update - Contract: %d, Timestamp: %s",
-				quote.ContractID, quote.Timestamp)
-
-			if bid, ok := quote.Entries["Bid"]; ok {
-				s.log.Debugf("  Bid: %.2f @ %.0f", bid.Price, bid.Size)
-			}
-			if offer, ok := quote.Entries["Offer"]; ok {
-				s.log.Debugf("  Offer: %.2f @ %.0f", offer.Price, offer.Size)
-			}
-			if trade, ok := quote.Entries["Trade"]; ok {
-				s.log.Infof("  Last: %.2f @ %.0f", trade.Price, trade.Size)
-			}
-		}
-
 		// Call custom handler if set
 		if s.OnQuoteUpdate != nil {
 			s.OnQuoteUpdate(quote)
@@ -196,6 +173,14 @@ func (s *DataSubscriber) handleChartData(data json.RawMessage) {
 
 // SubscribeQuote subscribes to real-time quote data for a symbol
 func (s *DataSubscriber) SubscribeQuote(symbol interface{}) error {
+	s.mu.Lock()
+	key := fmt.Sprintf("%s:%v", marketdata.SubscriptionTypeQuote, symbol)
+	if _, exists := s.subscriptions[key]; exists {
+		s.mu.Unlock()
+		return nil // Already subscribed
+	}
+	s.mu.Unlock()
+
 	body := map[string]interface{}{
 		"symbol": symbol,
 	}
@@ -205,7 +190,6 @@ func (s *DataSubscriber) SubscribeQuote(symbol interface{}) error {
 	}
 
 	s.mu.Lock()
-	key := fmt.Sprintf("%s:%v", marketdata.SubscriptionTypeQuote, symbol)
 	s.subscriptions[key] = fmt.Sprintf("%v", symbol)
 	s.mu.Unlock()
 

@@ -1,9 +1,8 @@
-package api
+package tradovate
 
 import (
 	"encoding/json"
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -13,44 +12,24 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// MessageHandler is a callback for processing incoming WebSocket messages
-type MessageHandler func(eventType string, data json.RawMessage)
-
-// TradovateWebSocketClient manages WebSocket connection lifecycle
-type TradovateWebSocketClient struct {
-	accessToken  string
-	wsURL        string
-	conn         *websocket.Conn
-	isAuthorized bool
-	mu           sync.RWMutex
-	log          *logger.Logger
-
-	// Message handler for routing events
-	messageHandler MessageHandler
-
-	// Refinements
-	nextRequestID uint32
-	openChan      chan struct{}
-}
-
-// WSResponse represents a WebSocket response from Tradovate
-type WSResponse struct {
-	ID         int             `json:"i,omitempty"`
-	Status     int             `json:"s,omitempty"`
-	Event      string          `json:"e,omitempty"`
-	Data       json.RawMessage `json:"d,omitempty"`
-	StatusText string          `json:"statusText,omitempty"`
-}
-
 // NewTradovateWebSocketClient creates a new WebSocket client
-func NewTradovateWebSocketClient(accessToken, environment string) *TradovateWebSocketClient {
+func NewTradovateWebSocketClient(accessToken, environment, wsType string) *TradovateWebSocketClient {
 	// Market data uses separate endpoints: md-demo and md-live
-	wsURL := config.GetWSBaseURL(environment)
+
+	var wsURL string
+	switch wsType {
+	case "md":
+		wsURL = config.GetMDWSBaseURL(environment)
+	default:
+		wsURL = config.GetWSBaseURL(environment)
+	}
 
 	return &TradovateWebSocketClient{
-		accessToken: accessToken,
-		wsURL:       wsURL,
-		openChan:    make(chan struct{}),
+		accessToken:     accessToken,
+		wsURL:           wsURL,
+		openChan:        make(chan struct{}),
+		pendingRequests: make(map[uint32]string),
+		heartbeatStop:   make(chan struct{}),
 	}
 }
 
@@ -84,6 +63,9 @@ func (c *TradovateWebSocketClient) Connect() error {
 
 	// Start message handler
 	go c.handleMessages()
+
+	// Start proactive heartbeat
+	go c.startHeartbeat()
 
 	// Authorize the connection
 	if err := c.authorize(); err != nil {
@@ -168,6 +150,7 @@ func (c *TradovateWebSocketClient) Send(url string, body interface{}) error {
 	// Format: url\nrequest_id\n\njson_body
 	// Note the double \n before the body
 	requestID := atomic.AddUint32(&c.nextRequestID, 1)
+	c.pendingRequests[requestID] = url
 	message := fmt.Sprintf("%s\n%d\n\n%s", url, requestID, jsonBody)
 
 	if c.log != nil {
@@ -221,8 +204,11 @@ func (c *TradovateWebSocketClient) handleMessages() {
 			}
 
 		case 'h':
-			// Heartbeat frame - send response
-			c.sendHeartbeat()
+			// Heartbeat frame - we send our own proactive heartbeats every 2.5s
+			// so we can just ignore the server's 'h' frame or log it.
+			if c.log != nil {
+				c.log.Debug("Received heartbeat frame from server")
+			}
 
 		case 'a':
 			// Array frame - contains JSON data
@@ -249,6 +235,9 @@ func (c *TradovateWebSocketClient) sendHeartbeat() {
 	defer c.mu.Unlock()
 
 	if c.conn != nil {
+		if c.log != nil {
+			c.log.Debug("Sending heartbeat response []")
+		}
 		c.conn.WriteMessage(websocket.TextMessage, []byte("[]"))
 	}
 }
@@ -264,6 +253,10 @@ func (c *TradovateWebSocketClient) handleArrayFrame(payload []byte) {
 	}
 
 	for _, msg := range messages {
+		// if c.log != nil {
+		// 	c.log.Infof("WS RECV: %s", string(msg))
+		// }
+
 		var response WSResponse
 		if err := json.Unmarshal(msg, &response); err != nil {
 			if c.log != nil {
@@ -294,6 +287,21 @@ func (c *TradovateWebSocketClient) handleArrayFrame(payload []byte) {
 		if response.Event != "" && c.messageHandler != nil {
 			c.messageHandler(response.Event, response.Data)
 			continue
+		}
+
+		// If no event name but has ID, it's a response to a request
+		if response.ID != 0 && c.messageHandler != nil {
+			c.mu.Lock()
+			url, ok := c.pendingRequests[uint32(response.ID)]
+			if ok {
+				delete(c.pendingRequests, uint32(response.ID))
+			}
+			c.mu.Unlock()
+
+			if ok {
+				c.messageHandler(url, response.Data)
+				continue
+			}
 		}
 
 		// Handle other responses
@@ -328,6 +336,12 @@ func (c *TradovateWebSocketClient) Disconnect() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Stop heartbeat
+	select {
+	case c.heartbeatStop <- struct{}{}:
+	default:
+	}
+
 	if c.conn != nil {
 		err := c.conn.Close()
 		c.conn = nil
@@ -336,4 +350,18 @@ func (c *TradovateWebSocketClient) Disconnect() error {
 	}
 
 	return nil
+}
+
+func (c *TradovateWebSocketClient) startHeartbeat() {
+	ticker := time.NewTicker(2500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			c.sendHeartbeat()
+		case <-c.heartbeatStop:
+			return
+		}
+	}
 }

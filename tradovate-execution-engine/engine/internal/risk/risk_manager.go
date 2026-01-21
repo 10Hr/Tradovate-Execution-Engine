@@ -1,25 +1,17 @@
-package execution
+package risk
 
 import (
 	"fmt"
-	"sync"
 	"time"
 
+	"tradovate-execution-engine/engine/config"
 	"tradovate-execution-engine/engine/internal/logger"
+	"tradovate-execution-engine/engine/internal/models"
+	"tradovate-execution-engine/engine/internal/portfolio"
 )
 
-// RiskManager handles risk checks and limits
-type RiskManager struct {
-	mu            sync.RWMutex
-	config        *Config
-	dailyPnL      float64
-	dailyPnLReset time.Time
-	tradeCount    int
-	log           *logger.Logger
-}
-
 // NewRiskManager creates a new risk manager
-func NewRiskManager(config *Config, log *logger.Logger) *RiskManager {
+func NewRiskManager(config *config.Config, log *logger.Logger) *RiskManager {
 	return &RiskManager{
 		config:        config,
 		dailyPnL:      0,
@@ -30,11 +22,11 @@ func NewRiskManager(config *Config, log *logger.Logger) *RiskManager {
 }
 
 // CheckOrderRisk validates if an order passes risk checks
-func (rm *RiskManager) CheckOrderRisk(order *Order, currentPosition *PositionPL, workingBuyQty, workingSellQty int) error {
+func (rm *RiskManager) CheckOrderRisk(order *models.Order, currentPosition *portfolio.PositionPL, workingBuyQty, workingSellQty int) error {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
-	if !rm.config.EnableRiskChecks {
+	if !rm.config.Risk.EnableRiskChecks {
 		return nil
 	}
 
@@ -44,10 +36,10 @@ func (rm *RiskManager) CheckOrderRisk(order *Order, currentPosition *PositionPL,
 	}
 
 	// Check daily loss limit
-	if rm.dailyPnL <= -rm.config.DailyLossLimit {
+	if rm.dailyPnL <= -rm.config.Risk.DailyLossLimit {
 		rm.log.Error("Daily loss limit reached")
 		return fmt.Errorf("daily loss limit of $%.2f reached (current: $%.2f)",
-			rm.config.DailyLossLimit, rm.dailyPnL)
+			rm.config.Risk.DailyLossLimit, rm.dailyPnL)
 	}
 
 	// Check max contracts
@@ -58,20 +50,20 @@ func (rm *RiskManager) CheckOrderRisk(order *Order, currentPosition *PositionPL,
 
 	// Calculate potential position based on order side
 	// We want to ensure that even if all working orders fill, we don't exceed limits
-	if order.Side == SideBuy {
+	if order.Side == models.SideBuy {
 		// Current position + existing working buys + this new buy order
 		potentialMaxLong := currentQty + workingBuyQty + order.Quantity
-		if potentialMaxLong > rm.config.MaxContracts {
-			rm.log.Errorf("Order would exceed max contracts limit: %d (Potential Long: %d)", rm.config.MaxContracts, potentialMaxLong)
-			return fmt.Errorf("order would exceed max contracts limit of %d", rm.config.MaxContracts)
+		if potentialMaxLong > rm.config.Risk.MaxContracts {
+			rm.log.Errorf("Order would exceed max contracts limit: %d (Potential Long: %d)", rm.config.Risk.MaxContracts, potentialMaxLong)
+			return fmt.Errorf("order would exceed max contracts limit of %d", rm.config.Risk.MaxContracts)
 		}
 	} else { // SideSell
 		// Current position - existing working sells - this new sell order
 		// Note: workingSellQty and order.Quantity are positive, so we subtract them
 		potentialMaxShort := currentQty - workingSellQty - order.Quantity
-		if potentialMaxShort < -rm.config.MaxContracts {
-			rm.log.Errorf("Order would exceed max contracts limit: %d (Potential Short: %d)", rm.config.MaxContracts, potentialMaxShort)
-			return fmt.Errorf("order would exceed max contracts limit of %d", rm.config.MaxContracts)
+		if potentialMaxShort < -rm.config.Risk.MaxContracts {
+			rm.log.Errorf("Order would exceed max contracts limit: %d (Potential Short: %d)", rm.config.Risk.MaxContracts, potentialMaxShort)
+			return fmt.Errorf("order would exceed max contracts limit of %d", rm.config.Risk.MaxContracts)
 		}
 	}
 

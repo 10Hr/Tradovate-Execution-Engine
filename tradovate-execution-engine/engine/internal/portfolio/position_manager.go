@@ -1,4 +1,4 @@
-package execution
+package portfolio
 
 import (
 	"encoding/json"
@@ -6,6 +6,7 @@ import (
 
 	"tradovate-execution-engine/engine/internal/logger"
 	"tradovate-execution-engine/engine/internal/marketdata"
+	"tradovate-execution-engine/engine/internal/tradovate"
 )
 
 // NewPositionManager creates a new position manager
@@ -13,7 +14,7 @@ func NewPositionManager(client, mdClient marketdata.WebSocketSender, userID int)
 	return &PositionManager{
 		client:      client,
 		mdClient:    mdClient,
-		pls:         make(map[string]*PositionPL),
+		Pls:         make(map[string]*PositionPL),
 		contractMap: make(map[int]string),
 		productMap:  make(map[string]float64),
 		userID:      userID,
@@ -22,8 +23,8 @@ func NewPositionManager(client, mdClient marketdata.WebSocketSender, userID int)
 
 // SetLogger sets the logger for the position manager
 func (pm *PositionManager) SetLogger(l *logger.Logger) {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
+	pm.Mu.Lock()
+	defer pm.Mu.Unlock()
 	pm.log = l
 }
 
@@ -46,6 +47,10 @@ func (pm *PositionManager) Start() error {
 
 // HandleUserSyncEvent processes the user sync response
 func (pm *PositionManager) HandleUserSyncEvent(data json.RawMessage) {
+	if pm.log != nil {
+		pm.log.Infof("Processing User Sync Event Data...")
+	}
+
 	var syncData UserSyncData
 	if err := json.Unmarshal(data, &syncData); err != nil {
 		if pm.log != nil {
@@ -67,7 +72,7 @@ func (pm *PositionManager) processInitialSync(syncData UserSyncData) {
 			len(syncData.Positions), len(syncData.Contracts), len(syncData.Products))
 	}
 
-	pm.mu.Lock()
+	pm.Mu.Lock()
 	// Populate lookup maps
 	for _, contract := range syncData.Contracts {
 		pm.contractMap[contract.ID] = contract.Name
@@ -76,7 +81,7 @@ func (pm *PositionManager) processInitialSync(syncData UserSyncData) {
 	for _, product := range syncData.Products {
 		pm.productMap[product.Name] = product.ValuePerPoint
 	}
-	pm.mu.Unlock()
+	pm.Mu.Unlock()
 
 	// Process each position
 	for _, pos := range syncData.Positions {
@@ -85,14 +90,14 @@ func (pm *PositionManager) processInitialSync(syncData UserSyncData) {
 			continue
 		}
 
-		pm.mu.RLock()
+		pm.Mu.RLock()
 		// Get contract name
 		contractName, ok := pm.contractMap[pos.ContractID]
 		if !ok {
 			if pm.log != nil {
 				pm.log.Warnf("Contract ID %d not found in contracts", pos.ContractID)
 			}
-			pm.mu.RUnlock()
+			pm.Mu.RUnlock()
 			continue
 		}
 
@@ -104,7 +109,7 @@ func (pm *PositionManager) processInitialSync(syncData UserSyncData) {
 				break
 			}
 		}
-		pm.mu.RUnlock()
+		pm.Mu.RUnlock()
 
 		if valuePerPoint == 0 {
 			if pm.log != nil {
@@ -137,27 +142,27 @@ func (pm *PositionManager) subscribeToPosition(contractName string, pos Position
 	}
 
 	// Store position info for quote processing
-	pm.mu.Lock()
-	pm.pls[contractName] = &PositionPL{
+	pm.Mu.Lock()
+	pm.Pls[contractName] = &PositionPL{
 		Name:          contractName,
 		NetPos:        pos.NetPos,
 		AvgPrice:      pos.NetPrice,
 		ValuePerPoint: valuePerPoint,
 	}
-	pm.mu.Unlock()
+	pm.Mu.Unlock()
 }
 
 // HandleQuoteUpdate processes quote updates and calculates P&L
 func (pm *PositionManager) HandleQuoteUpdate(quote marketdata.Quote) {
 	// Find position for this contract
-	pm.mu.RLock()
+	pm.Mu.RLock()
 	contractName, ok := pm.contractMap[quote.ContractID]
 	if !ok {
-		pm.mu.RUnlock()
+		pm.Mu.RUnlock()
 		return
 	}
-	positionPL, exists := pm.pls[contractName]
-	pm.mu.RUnlock()
+	positionPL, exists := pm.Pls[contractName]
+	pm.Mu.RUnlock()
 
 	if !exists {
 		// No position tracking for this symbol
@@ -176,10 +181,10 @@ func (pm *PositionManager) HandleQuoteUpdate(quote marketdata.Quote) {
 
 // calculateAndUpdatePL calculates and updates P&L for a position
 func (pm *PositionManager) calculateAndUpdatePL(name string, currentPrice float64, netPos int) {
-	pm.mu.Lock()
-	positionPL, exists := pm.pls[name]
+	pm.Mu.Lock()
+	positionPL, exists := pm.Pls[name]
 	if !exists {
-		pm.mu.Unlock()
+		pm.Mu.Unlock()
 		return
 	}
 
@@ -191,7 +196,7 @@ func (pm *PositionManager) calculateAndUpdatePL(name string, currentPrice float6
 	}
 
 	currentPL := positionPL.PL
-	pm.mu.Unlock()
+	pm.Mu.Unlock()
 
 	if pm.log != nil {
 		pm.log.Debugf("P&L Update - %s: $%.2f (Price: %.2f, Pos: %d)",
@@ -210,7 +215,7 @@ func (pm *PositionManager) calculateAndUpdatePL(name string, currentPrice float6
 // runPL calculates and reports total P&L across all positions
 func (pm *PositionManager) runPL() {
 	totalPL := 0.0
-	for _, positionPL := range pm.pls {
+	for _, positionPL := range pm.Pls {
 		totalPL += positionPL.PL
 	}
 
@@ -226,10 +231,10 @@ func (pm *PositionManager) runPL() {
 
 // GetPositionPL returns the P&L for a specific position
 func (pm *PositionManager) GetPositionPL(name string) (float64, bool) {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
+	pm.Mu.RLock()
+	defer pm.Mu.RUnlock()
 
-	if positionPL, exists := pm.pls[name]; exists {
+	if positionPL, exists := pm.Pls[name]; exists {
 		return positionPL.PL, true
 	}
 	return 0, false
@@ -237,11 +242,11 @@ func (pm *PositionManager) GetPositionPL(name string) (float64, bool) {
 
 // GetTotalPL returns the total P&L across all positions
 func (pm *PositionManager) GetTotalPL() float64 {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
+	pm.Mu.RLock()
+	defer pm.Mu.RUnlock()
 
 	totalPL := 0.0
-	for _, positionPL := range pm.pls {
+	for _, positionPL := range pm.Pls {
 		totalPL += positionPL.PL
 	}
 	return totalPL
@@ -249,21 +254,23 @@ func (pm *PositionManager) GetTotalPL() float64 {
 
 // GetAllPositions returns a copy of all position P&Ls
 func (pm *PositionManager) GetAllPositions() map[string]PositionPL {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
+	pm.Mu.RLock()
+	defer pm.Mu.RUnlock()
 
 	positions := make(map[string]PositionPL)
-	for name, positionPL := range pm.pls {
+	for name, positionPL := range pm.Pls {
 		positions[name] = *positionPL
 	}
 	return positions
 }
 
 // HandlePositionUpdate processes real-time position updates
-func (pm *PositionManager) HandlePositionUpdate(pos APIPosition) {
-	pm.mu.RLock()
-	contractName, ok := pm.contractMap[pos.ContractID]
-	pm.mu.RUnlock()
+func (pm *PositionManager) HandlePositionUpdate(pos tradovate.APIPosition) {
+	pm.log.Printf("ContractID: %d, ID: %d, NetPos: %d, NetPrice: %.2f, BoughtValue: %.2f",
+		pos.ContractID, pos.ID, pos.NetPos, pos.NetPrice, pos.BoughtValue)
+	pm.Mu.RLock()
+	contractName, ok := pm.contractMap[pos.ID]
+	pm.Mu.RUnlock()
 
 	if !ok {
 		if pm.log != nil {
@@ -272,9 +279,9 @@ func (pm *PositionManager) HandlePositionUpdate(pos APIPosition) {
 		return
 	}
 
-	pm.mu.Lock()
+	pm.Mu.Lock()
 	// Update existing position
-	if positionPL, exists := pm.pls[contractName]; exists {
+	if positionPL, exists := pm.Pls[contractName]; exists {
 		positionPL.NetPos = pos.NetPos
 		positionPL.AvgPrice = pos.NetPrice
 
@@ -289,8 +296,8 @@ func (pm *PositionManager) HandlePositionUpdate(pos APIPosition) {
 			pm.log.Infof("Updated position %s: NetPos=%d, AvgPrice=%.2f, RealizedPL=%.2f",
 				contractName, pos.NetPos, pos.NetPrice, positionPL.RealizedPL)
 		}
-		pm.mu.Unlock()
+		pm.Mu.Unlock()
 		return
 	}
-	pm.mu.Unlock()
+	pm.Mu.Unlock()
 }

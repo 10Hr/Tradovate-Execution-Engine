@@ -5,74 +5,42 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 	"time"
 
+	"tradovate-execution-engine/engine/config"
 	"tradovate-execution-engine/engine/internal/auth"
 	"tradovate-execution-engine/engine/internal/logger"
+	"tradovate-execution-engine/engine/internal/models"
+	"tradovate-execution-engine/engine/internal/portfolio"
+	"tradovate-execution-engine/engine/internal/risk"
+	"tradovate-execution-engine/engine/internal/tradovate"
 )
 
-// APIPosition represents the Tradovate position response
-type APIPosition struct {
-	ID          int     `json:"id"`
-	ContractID  int     `json:"contractId"`
-	NetPos      int     `json:"netPos"`
-	NetPrice    float64 `json:"netPrice"`
-	BoughtValue float64 `json:"boughtValue"`
-	SoldValue   float64 `json:"soldValue"`
-}
-
-// OrderManager handles order submission and tracking
-type OrderManager struct {
-	mu              sync.RWMutex
-	orders          map[string]*Order // Map of order ID to order
-	positionManager *PositionManager
-	riskManager     *RiskManager
-	config          *Config
-	log             *logger.Logger
-	orderIDCounter  int
-	symbol          string
-}
-
 // NewOrderManager creates a new order manager
-func NewOrderManager(symbol string, config *Config, log *logger.Logger) *OrderManager {
+func NewOrderManager(config *config.Config, log *logger.Logger) *OrderManager {
 	return &OrderManager{
-		orders:         make(map[string]*Order),
-		riskManager:    NewRiskManager(config, log),
+		orders:         make(map[string]*models.Order),
+		riskManager:    risk.NewRiskManager(config, log),
 		config:         config,
 		log:            log,
 		orderIDCounter: 0,
-		symbol:         symbol,
 	}
 }
 
 // SetPositionManager sets the position manager for the order manager
-func (om *OrderManager) SetPositionManager(pm *PositionManager) {
-	om.mu.Lock()
-	defer om.mu.Unlock()
+func (om *OrderManager) SetPositionManager(pm *portfolio.PositionManager) {
+	om.Mu.Lock()
+	defer om.Mu.Unlock()
 	om.positionManager = pm
-}
-
-// APIOrderEvent represents the Tradovate order event
-type APIOrderEvent struct {
-	ID           int     `json:"id"`
-	OrderID      int     `json:"orderId"`
-	ContractID   int     `json:"contractId"`
-	Action       string  `json:"action"`    // Buy, Sell
-	OrdStatus    string  `json:"ordStatus"` // Pending, Working, Filled, Cancelled, Rejected
-	FilledQty    int     `json:"cumQty"`    // Cumulative filled quantity
-	AvgFillPrice float64 `json:"avgPrice"`
-	RejectReason string  `json:"rejectReason"`
-	Text         string  `json:"text"`
 }
 
 // HandleRawOrderEvent processes raw order events from the API
 func (om *OrderManager) HandleRawOrderEvent(data json.RawMessage) {
 	// Try parsing as list first
-	var events []APIOrderEvent
+	var events []tradovate.APIOrderEvent
 	if err := json.Unmarshal(data, &events); err != nil {
 		// Try parsing as single object
-		var singleEvent APIOrderEvent
+		var singleEvent tradovate.APIOrderEvent
 		if err2 := json.Unmarshal(data, &singleEvent); err2 != nil {
 			om.log.Warnf("Failed to parse order event: %v", err)
 			return
@@ -85,23 +53,23 @@ func (om *OrderManager) HandleRawOrderEvent(data json.RawMessage) {
 	}
 }
 
-func (om *OrderManager) processOrderEvent(event APIOrderEvent) {
+func (om *OrderManager) processOrderEvent(event tradovate.APIOrderEvent) {
 	om.log.Infof("Received Order Event: ID=%d Status=%s Filled=%d @ %.2f",
 		event.OrderID, event.OrdStatus, event.FilledQty, event.AvgFillPrice)
 
 	// We need to map external ID (int) to our internal ID (string)
 	// Iterate through orders to find matching ExternalID
 	// This is O(N) but N is small. If N grows, we need a reverse map.
-	var order *Order
+	var order *models.Order
 
-	om.mu.RLock()
+	om.Mu.RLock()
 	for _, o := range om.orders {
 		if o.ExternalID == fmt.Sprintf("%d", event.OrderID) || o.ExternalID == fmt.Sprintf("%d", event.ID) {
 			order = o
 			break
 		}
 	}
-	om.mu.RUnlock()
+	om.Mu.RUnlock()
 
 	if order == nil {
 		// It might be an order originating from outside this engine (e.g. mobile app)
@@ -118,10 +86,7 @@ func (om *OrderManager) processOrderEvent(event APIOrderEvent) {
 		// If we want incremental fill, we need to track previous cumQty.
 		// For simplicity, let's assume fully filled or just update to the new state.
 
-		// If we are already filled, ignore?
-		// Or maybe it's a correction.
-
-		if order.Status != StatusFilled {
+		if order.Status != models.StatusFilled {
 			// This is a new fill state
 			// Use ProcessFill to handle PnL and Position updates
 			// But ProcessFill expects incremental quantity and price of this fill.
@@ -136,34 +101,34 @@ func (om *OrderManager) processOrderEvent(event APIOrderEvent) {
 		}
 
 	case "Rejected":
-		om.mu.Lock()
-		canRetry := order.RetryCount < om.config.MaxOrderRetries
+		om.Mu.Lock()
+		canRetry := order.RetryCount < om.config.Risk.MaxOrderRetries
 		if canRetry {
 			order.RetryCount++
-			om.log.Warnf("Order %s rejected, retrying (Attempt %d/%d)... Reason: %s", 
-				order.ID, order.RetryCount, om.config.MaxOrderRetries, event.RejectReason)
+			om.log.Warnf("Order %s rejected, retrying (Attempt %d/%d)... Reason: %s",
+				order.ID, order.RetryCount, om.config.Risk.MaxOrderRetries, event.RejectReason)
 		}
-		om.mu.Unlock()
+		om.Mu.Unlock()
 
 		if canRetry {
 			// Update status to pending before resubmitting
-			om.updateOrderStatus(order.ID, StatusPending, fmt.Sprintf("Retrying after rejection (Attempt %d)", order.RetryCount))
+			om.updateOrderStatus(order.ID, models.StatusPending, fmt.Sprintf("Retrying after rejection (Attempt %d)", order.RetryCount))
 			om.log.Printf("ORDER RETRY [%s]: Resubmitting after rejection", order.ID)
-			
+
 			// Try to resubmit
 			if err := om.submitOrderToExchange(order); err != nil {
-				om.updateOrderStatus(order.ID, StatusRejected, "Retry failed: "+err.Error())
+				om.updateOrderStatus(order.ID, models.StatusRejected, "Retry failed: "+err.Error())
 			}
 		} else {
-			om.updateOrderStatus(order.ID, StatusRejected, event.RejectReason+" "+event.Text)
+			om.updateOrderStatus(order.ID, models.StatusRejected, event.RejectReason+" "+event.Text)
 			om.log.Errorf("ORDER FAILED [%s]: Max retries reached or unrecoverable error. Reason: %s", order.ID, event.RejectReason)
 		}
 
 	case "Cancelled", "Canceled":
-		om.updateOrderStatus(order.ID, StatusCanceled, event.Text)
+		om.updateOrderStatus(order.ID, models.StatusCanceled, event.Text)
 
 	case "Working":
-		om.updateOrderStatus(order.ID, StatusSubmitted, "")
+		om.updateOrderStatus(order.ID, models.StatusSubmitted, "")
 
 	default:
 		// Pending, Suspended, etc.
@@ -173,62 +138,62 @@ func (om *OrderManager) processOrderEvent(event APIOrderEvent) {
 }
 
 // HandlePositionUpdate processes real-time position updates
-func (om *OrderManager) HandlePositionUpdate(pos APIPosition) {
+func (om *OrderManager) HandlePositionUpdate(pos tradovate.APIPosition) {
 	if om.positionManager != nil {
 		om.positionManager.HandlePositionUpdate(pos)
 	}
 }
 
 // SubmitMarketOrder submits a market order
-func (om *OrderManager) SubmitMarketOrder(symbol string, side OrderSide, quantity int) (*Order, error) {
-	om.mu.Lock()
+func (om *OrderManager) SubmitMarketOrder(symbol string, side models.OrderSide, quantity int) (*models.Order, error) {
+	om.Mu.Lock()
 
 	// Generate order ID
 	om.orderIDCounter++
 	orderID := fmt.Sprintf("ORD-%s-%d-%d", symbol, time.Now().Unix(), om.orderIDCounter)
 
-	order := &Order{
+	order := &models.Order{
 		ID:          orderID,
 		Symbol:      symbol,
 		Side:        side,
-		Type:        TypeMarket,
+		Type:        models.TypeMarket,
 		Quantity:    quantity,
 		Price:       0, // Market order
-		Status:      StatusPending,
+		Status:      models.StatusPending,
 		SubmittedAt: time.Now(),
 	}
 
 	om.orders[orderID] = order
-	om.mu.Unlock()
+	om.Mu.Unlock()
 
 	om.log.Infof("Created market order: %s %s %d %s", orderID, side, quantity, symbol)
-	
+
 	// Check risk before submitting
-	var currentPosition *PositionPL
+	var currentPosition *portfolio.PositionPL
 	if om.positionManager != nil {
-		pos := om.positionManager.pls[symbol]
+		pos := om.positionManager.Pls[symbol]
 		currentPosition = pos
 	}
 
 	workingBuyQty, workingSellQty := om.getWorkingQuantities(orderID)
 	if err := om.riskManager.CheckOrderRisk(order, currentPosition, workingBuyQty, workingSellQty); err != nil {
-		om.updateOrderStatus(orderID, StatusRejected, err.Error())
+		om.updateOrderStatus(orderID, models.StatusRejected, err.Error())
 		return order, fmt.Errorf("risk check failed: %w", err)
 	}
 
 	// Submit order (this will eventually call Tradovate API)
 	if err := om.submitOrderToExchange(order); err != nil {
-		om.updateOrderStatus(orderID, StatusFailed, err.Error())
+		om.updateOrderStatus(orderID, models.StatusFailed, err.Error())
 		return order, err
 	}
 
-	om.updateOrderStatus(orderID, StatusSubmitted, "")
+	om.updateOrderStatus(orderID, models.StatusSubmitted, "")
 	return order, nil
 }
 
 // // SubmitLimitOrder submits a limit order
-// func (om *OrderManager) SubmitLimitOrder(symbol string, side OrderSide, quantity int, price float64) (*Order, error) {
-// 	om.mu.Lock()
+// func (om *OrderManager) SubmitLimitOrder(symbol string, side OrderSide, quantity int, price float64) (*models.Order, error) {
+// 	om.Mu.Lock()
 
 // 	om.orderIDCounter++
 // 	orderID := fmt.Sprintf("ORD-%s-%d-%d", symbol, time.Now().Unix(), om.orderIDCounter)
@@ -245,7 +210,7 @@ func (om *OrderManager) SubmitMarketOrder(symbol string, side OrderSide, quantit
 // 	}
 
 // 	om.orders[orderID] = order
-// 	om.mu.Unlock()
+// 	om.Mu.Unlock()
 
 // 	om.log.Infof("Created limit order: %s %s %d %s @ %.2f", orderID, side, quantity, symbol, price)
 
@@ -268,8 +233,8 @@ func (om *OrderManager) SubmitMarketOrder(symbol string, side OrderSide, quantit
 
 // getWorkingQuantities returns the total quantity of working buy and sell orders, excluding the specified order ID
 func (om *OrderManager) getWorkingQuantities(excludeOrderID string) (int, int) {
-	om.mu.RLock()
-	defer om.mu.RUnlock()
+	om.Mu.RLock()
+	defer om.Mu.RUnlock()
 
 	buyQty := 0
 	sellQty := 0
@@ -279,10 +244,11 @@ func (om *OrderManager) getWorkingQuantities(excludeOrderID string) (int, int) {
 			continue
 		}
 		// Consider Pending and Submitted orders as working
-		if order.Status == StatusPending || order.Status == StatusSubmitted {
-			if order.Side == SideBuy {
+		if order.Status == models.StatusPending || order.Status == models.StatusSubmitted {
+			switch order.Side {
+			case models.SideBuy:
 				buyQty += order.Quantity
-			} else if order.Side == SideSell {
+			case models.SideSell:
 				sellQty += order.Quantity
 			}
 		}
@@ -291,7 +257,7 @@ func (om *OrderManager) getWorkingQuantities(excludeOrderID string) (int, int) {
 }
 
 // submitOrderToExchange submits order to the exchange (Tradovate API)
-func (om *OrderManager) submitOrderToExchange(order *Order) error {
+func (om *OrderManager) submitOrderToExchange(order *models.Order) error {
 	//om.log.Infof("Submitting order %s to exchange...", order.ID)
 	om.log.Infof("Submitting order %s to exchange...", order.ID)
 
@@ -333,7 +299,7 @@ func (om *OrderManager) submitOrderToExchange(order *Order) error {
 		"isAutomated": true,
 	}
 
-	if order.Type == TypeLimit {
+	if order.Type == models.TypeLimit {
 		orderRequest["price"] = order.Price
 	}
 
@@ -374,9 +340,9 @@ func (om *OrderManager) submitOrderToExchange(order *Order) error {
 
 // ProcessFill processes an order fill
 func (om *OrderManager) ProcessFill(orderID string, fillPrice float64, fillQuantity int) error {
-	om.mu.RLock()
+	om.Mu.RLock()
 	order, exists := om.orders[orderID]
-	om.mu.RUnlock()
+	om.Mu.RUnlock()
 
 	if !exists {
 		return fmt.Errorf("order not found: %s", orderID)
@@ -385,12 +351,12 @@ func (om *OrderManager) ProcessFill(orderID string, fillPrice float64, fillQuant
 	om.log.Infof("Processing fill for order %s: %d @ %.2f", orderID, fillQuantity, fillPrice)
 
 	// Update order
-	om.mu.Lock()
-	order.Status = StatusFilled
+	om.Mu.Lock()
+	order.Status = models.StatusFilled
 	order.FilledAt = time.Now()
 	order.FilledPrice = fillPrice
 	order.FilledQty = fillQuantity
-	om.mu.Unlock()
+	om.Mu.Unlock()
 
 	// Update trade count
 	om.riskManager.IncrementTradeCount()
@@ -403,15 +369,15 @@ func (om *OrderManager) ProcessFill(orderID string, fillPrice float64, fillQuant
 
 // CancelOrder cancels an order
 func (om *OrderManager) CancelOrder(orderID string) error {
-	om.mu.RLock()
+	om.Mu.RLock()
 	order, exists := om.orders[orderID]
-	om.mu.RUnlock()
+	om.Mu.RUnlock()
 
 	if !exists {
 		return fmt.Errorf("order not found: %s", orderID)
 	}
 
-	if order.Status == StatusFilled {
+	if order.Status == models.StatusFilled {
 		return fmt.Errorf("cannot cancel filled order: %s", orderID)
 	}
 
@@ -438,7 +404,7 @@ func (om *OrderManager) CancelOrder(orderID string) error {
 	// Tradovate expects external order ID for cancellation
 	// If we don't have it (e.g. simulated or pending), we can't cancel via API
 	if order.ExternalID == "" {
-		om.updateOrderStatus(orderID, StatusCanceled, "Local cancellation (no external ID)")
+		om.updateOrderStatus(orderID, models.StatusCanceled, "Local cancellation (no external ID)")
 		return nil
 	}
 
@@ -469,16 +435,16 @@ func (om *OrderManager) CancelOrder(orderID string) error {
 		// Don't error out, just log it, as order might already be filled/cancelled
 	}
 
-	om.updateOrderStatus(orderID, StatusCanceled, "")
+	om.updateOrderStatus(orderID, models.StatusCanceled, "")
 	om.log.Infof("Order %s canceled", orderID)
 
 	return nil
 }
 
 // updateOrderStatus updates an order's status
-func (om *OrderManager) updateOrderStatus(orderID string, status OrderStatus, reason string) {
-	om.mu.Lock()
-	defer om.mu.Unlock()
+func (om *OrderManager) updateOrderStatus(orderID string, status models.OrderStatus, reason string) {
+	om.Mu.Lock()
+	defer om.Mu.Unlock()
 
 	if order, exists := om.orders[orderID]; exists {
 		order.Status = status
@@ -492,9 +458,9 @@ func (om *OrderManager) updateOrderStatus(orderID string, status OrderStatus, re
 }
 
 // GetOrder returns an order by ID
-func (om *OrderManager) GetOrder(orderID string) (*Order, error) {
-	om.mu.RLock()
-	defer om.mu.RUnlock()
+func (om *OrderManager) GetOrder(orderID string) (*models.Order, error) {
+	om.Mu.RLock()
+	defer om.Mu.RUnlock()
 
 	order, exists := om.orders[orderID]
 	if !exists {
@@ -505,11 +471,11 @@ func (om *OrderManager) GetOrder(orderID string) (*Order, error) {
 }
 
 // GetAllOrders returns all orders
-func (om *OrderManager) GetAllOrders() []*Order {
-	om.mu.RLock()
-	defer om.mu.RUnlock()
+func (om *OrderManager) GetAllOrders() []*models.Order {
+	om.Mu.RLock()
+	defer om.Mu.RUnlock()
 
-	orders := make([]*Order, 0, len(om.orders))
+	orders := make([]*models.Order, 0, len(om.orders))
 	for _, order := range om.orders {
 		orders = append(orders, order)
 	}
@@ -518,15 +484,15 @@ func (om *OrderManager) GetAllOrders() []*Order {
 }
 
 // GetPosition returns the current position for the main symbol
-func (om *OrderManager) GetPosition() PositionPL {
+func (om *OrderManager) GetPosition(symbol string) portfolio.PositionPL {
 	if om.positionManager != nil {
-		om.positionManager.mu.RLock()
-		defer om.positionManager.mu.RUnlock()
-		if pos, ok := om.positionManager.pls[om.symbol]; ok {
+		om.positionManager.Mu.RLock()
+		defer om.positionManager.Mu.RUnlock()
+		if pos, ok := om.positionManager.Pls[symbol]; ok {
 			return *pos
 		}
 	}
-	return PositionPL{Name: om.symbol}
+	return portfolio.PositionPL{Name: symbol}
 }
 
 // GetDailyPnL returns the total daily PnL from PositionManager
@@ -543,10 +509,10 @@ func (om *OrderManager) UpdatePrice(price float64) {
 
 // Reset resets the order manager
 func (om *OrderManager) Reset() {
-	om.mu.Lock()
-	om.orders = make(map[string]*Order)
+	om.Mu.Lock()
+	om.orders = make(map[string]*models.Order)
 	om.orderIDCounter = 0
-	om.mu.Unlock()
+	om.Mu.Unlock()
 
 	om.log.Info("Order manager reset")
 }
