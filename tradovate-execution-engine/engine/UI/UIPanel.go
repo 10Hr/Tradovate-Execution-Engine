@@ -1908,7 +1908,7 @@ func (m model) connectCmd() tea.Cmd {
 		}
 
 		// Get Access Token for Trading
-		token, err := tm.GetAccessToken()
+		accessToken, err := tm.GetAccessToken()
 		if err != nil {
 			return connMsg{err: fmt.Errorf("token error: %v", err)}
 		}
@@ -1920,7 +1920,7 @@ func (m model) connectCmd() tea.Cmd {
 		mdClient.SetLogger(m.mainLogger)
 
 		// Trading Client
-		tradingClient := tradovate.NewTradovateWebSocketClient(token, cfg.Tradovate.Environment, "")
+		tradingClient := tradovate.NewTradovateWebSocketClient(accessToken, cfg.Tradovate.Environment, "")
 		tradingClient.SetLogger(m.mainLogger)
 
 		// Create Subscribers
@@ -1931,10 +1931,10 @@ func (m model) connectCmd() tea.Cmd {
 		tradingSubscriber.SetLogger(m.mainLogger)
 
 		// Initialize PositionManager
-		//userID := tm.GetUserID()
+		userID := tm.GetUserID()
 
 		// Create and start tracker
-		tracker := portfolio.NewPortfolioTracker(m.mainLogger)
+		tracker := portfolio.NewPortfolioTracker(accessToken, mdToken, userID, m.mainLogger)
 		if err := tracker.Start(cfg.Tradovate.Environment); err != nil {
 			m.mainLogger.Errorf("Failed to start PortfolioTracker: %v", err)
 		}

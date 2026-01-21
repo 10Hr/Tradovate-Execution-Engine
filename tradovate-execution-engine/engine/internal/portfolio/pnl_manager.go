@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"tradovate-execution-engine/engine/internal/auth"
 	"tradovate-execution-engine/engine/internal/logger"
 	"tradovate-execution-engine/engine/internal/marketdata"
 	"tradovate-execution-engine/engine/internal/tradovate"
@@ -96,6 +95,11 @@ type PortfolioTracker struct {
 	running    bool
 	mu         sync.Mutex
 
+	// Tokens
+	accessToken   string
+	mdAccessToken string
+	userID        int
+
 	// State tracking
 	positions map[int]*Position
 	contracts map[int]string
@@ -103,13 +107,16 @@ type PortfolioTracker struct {
 }
 
 // NewPortfolioTracker creates a new portfolio tracker
-func NewPortfolioTracker(log *logger.Logger) *PortfolioTracker {
+func NewPortfolioTracker(accessToken, mdAccessToken string, userID int, log *logger.Logger) *PortfolioTracker {
 	return &PortfolioTracker{
-		plTracker: NewPLTracker(log),
-		log:       log,
-		positions: make(map[int]*Position),
-		contracts: make(map[int]string),
-		products:  make(map[string]float64),
+		plTracker:     NewPLTracker(log),
+		log:           log,
+		positions:     make(map[int]*Position),
+		contracts:     make(map[int]string),
+		products:      make(map[string]float64),
+		accessToken:   accessToken,
+		mdAccessToken: mdAccessToken,
+		userID:        userID,
 	}
 }
 
@@ -123,46 +130,46 @@ func (pt *PortfolioTracker) Start(environment string) error {
 	pt.running = true
 	pt.mu.Unlock()
 
-	// Get token manager
-	tm := auth.GetTokenManager()
-	tm.SetLogger(pt.log)
+	//Get token manager
+	// tm := auth.GetTokenManager()
+	// tm.SetLogger(pt.log)
 
-	// Ensure we're authenticated
-	if !tm.IsAuthenticated() {
-		return fmt.Errorf("not authenticated - please authenticate first")
-	}
+	// // we're authenticated
+	// if !tm.IsAuthenticated() {
+	// 	return fmt.Errorf("not authenticated - please authenticate first")
+	// }
 
-	// Get tokens
-	accessToken, err := tm.GetAccessToken()
-	if err != nil {
-		return fmt.Errorf("failed to get access token: %w", err)
-	}
+	// // Get tokens
+	// accessToken, err := tm.GetAccessToken()
+	// if err != nil {
+	// 	return fmt.Errorf("failed to get access token: %w", err)
+	// }
 
-	mdAccessToken, err := tm.GetMDAccessToken()
-	if err != nil {
-		return fmt.Errorf("failed to get MD access token: %w", err)
-	}
+	// mdAccessToken, err := tm.GetMDAccessToken()
+	// if err != nil {
+	// 	return fmt.Errorf("failed to get MD access token: %w", err)
+	// }
 
-	userID := tm.GetUserID()
+	// userID := tm.GetUserID()
 
 	// Create WebSocket clients
-	pt.authClient = tradovate.NewTradovateWebSocketClient(accessToken, environment, "auth")
+	pt.authClient = tradovate.NewTradovateWebSocketClient(pt.accessToken, environment, "auth")
 	pt.authClient.SetLogger(pt.log)
 
-	pt.mdClient = tradovate.NewTradovateWebSocketClient(mdAccessToken, environment, "md")
+	pt.mdClient = tradovate.NewTradovateWebSocketClient(pt.mdAccessToken, environment, "md")
 	pt.mdClient.SetLogger(pt.log)
 
 	// Connect auth client
 	if err := pt.authClient.Connect(); err != nil {
 		return fmt.Errorf("failed to connect auth websocket: %w", err)
 	}
-	pt.log.Info("✓ Auth WebSocket connected")
+	pt.log.Info("Auth WebSocket connected")
 
 	// Connect market data client
 	if err := pt.mdClient.Connect(); err != nil {
 		return fmt.Errorf("failed to connect MD websocket: %w", err)
 	}
-	pt.log.Info("✓ Market Data WebSocket connected")
+	pt.log.Info("Market Data WebSocket connected")
 
 	// Create subscriber for auth client (user sync)
 	authSubscriber := tradovate.NewDataSubscriber(pt.authClient)
@@ -189,11 +196,11 @@ func (pt *PortfolioTracker) Start(environment string) error {
 	pt.mdClient.SetMessageHandler(pt.subscriber.HandleEvent)
 
 	// Subscribe to user sync
-	if err := authSubscriber.SubscribeUserSyncRequests([]int{userID}); err != nil {
+	if err := authSubscriber.SubscribeUserSyncRequests([]int{pt.userID}); err != nil {
 		return fmt.Errorf("failed to subscribe to user sync: %w", err)
 	}
 
-	pt.log.Info("✓ Subscribed to user sync - waiting for position data...")
+	pt.log.Info("Subscribed to user sync - waiting for position data...")
 
 	return nil
 }
