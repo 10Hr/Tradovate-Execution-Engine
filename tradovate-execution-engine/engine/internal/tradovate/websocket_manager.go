@@ -12,7 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// NewTradovateWebSocketClient creates a new WebSocket client
+// // NewTradovateWebSocketClient creates a new WebSocket client
 func NewTradovateWebSocketClient(accessToken, environment, wsType string) *TradovateWebSocketClient {
 	// Market data uses separate endpoints: md-demo and md-live
 

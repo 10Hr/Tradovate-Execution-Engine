@@ -121,14 +121,14 @@ func (pt *PortfolioTracker) Start(environment string) error {
 	pt.mu.Lock()
 	if pt.running {
 		pt.mu.Unlock()
-		return fmt.Errorf("portfolio tracker already running")
+		return fmt.Errorf("Portfolio tracker already running")
 	}
 	pt.running = true
 	pt.mu.Unlock()
 
 	// Ensure clients are connected
 	if pt.authClient == nil || pt.mdClient == nil {
-		return fmt.Errorf("websocket clients not initialized")
+		return fmt.Errorf("Websocket clients not initialized")
 	}
 
 	if !pt.authClient.IsAuthorized() {

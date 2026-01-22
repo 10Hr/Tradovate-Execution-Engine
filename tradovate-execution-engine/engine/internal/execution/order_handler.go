@@ -102,27 +102,27 @@ func (om *OrderManager) processOrderEvent(event tradovate.APIOrderEvent) {
 
 	case "Rejected":
 		om.Mu.Lock()
-		canRetry := order.RetryCount < om.config.Risk.MaxOrderRetries
-		if canRetry {
-			order.RetryCount++
-			om.log.Warnf("Order %s rejected, retrying (Attempt %d/%d)... Reason: %s",
-				order.ID, order.RetryCount, om.config.Risk.MaxOrderRetries, event.RejectReason)
-		}
+		// canRetry := order.RetryCount < om.config.Risk.MaxOrderRetries
+		// if canRetry {
+		// 	order.RetryCount++
+		// 	om.log.Warnf("Order %s rejected, retrying (Attempt %d/%d)... Reason: %s",
+		// 		order.ID, order.RetryCount, om.config.Risk.MaxOrderRetries, event.RejectReason)
+		// }
 		om.Mu.Unlock()
 
-		if canRetry {
-			// Update status to pending before resubmitting
-			om.updateOrderStatus(order.ID, models.StatusPending, fmt.Sprintf("Retrying after rejection (Attempt %d)", order.RetryCount))
-			om.log.Printf("ORDER RETRY [%s]: Resubmitting after rejection", order.ID)
+		//if canRetry {
+		// Update status to pending before resubmitting
+		// 	om.updateOrderStatus(order.ID, models.StatusPending, fmt.Sprintf("Retrying after rejection (Attempt %d)", order.RetryCount))
+		// 	om.log.Printf("ORDER RETRY [%s]: Resubmitting after rejection", order.ID)
 
-			// Try to resubmit
-			if err := om.submitOrderToExchange(order); err != nil {
-				om.updateOrderStatus(order.ID, models.StatusRejected, "Retry failed: "+err.Error())
-			}
-		} else {
-			om.updateOrderStatus(order.ID, models.StatusRejected, event.RejectReason+" "+event.Text)
-			om.log.Errorf("ORDER FAILED [%s]: Max retries reached or unrecoverable error. Reason: %s", order.ID, event.RejectReason)
-		}
+		// 	// Try to resubmit
+		// 	if err := om.submitOrderToExchange(order); err != nil {
+		// 		om.updateOrderStatus(order.ID, models.StatusRejected, "Retry failed: "+err.Error())
+		// 	}
+		// } else {
+		om.updateOrderStatus(order.ID, models.StatusRejected, event.RejectReason+" "+event.Text)
+		om.log.Errorf("ORDER FAILED [%s]: Max retries reached or unrecoverable error. Reason: %s", order.ID, event.RejectReason)
+		//}
 
 	case "Cancelled", "Canceled":
 		om.updateOrderStatus(order.ID, models.StatusCanceled, event.Text)

@@ -7,30 +7,41 @@ import (
 	"path/filepath"
 )
 
+const (
+	liveUrl = "https://live.tradovateapi.com"
+	demoUrl = "https://demo.tradovateapi.com"
+
+	baseLiveWSUrl = "wss://live.tradovateapi.com/v1/websocket"
+	baseDemoWSUrl = "wss://demo.tradovateapi.com/v1/websocket"
+
+	mdLiveWSUrl = "wss://md-live.tradovateapi.com/v1/websocket"
+	mdDemoWSUrl = "wss://md-demo.tradovateapi.com/v1/websocket"
+)
+
 // GetHTTPBaseURL returns the HTTP API base URL for the given environment
 func GetHTTPBaseURL(environment string) string {
 	if environment == "live" {
-		return "https://live.tradovateapi.com"
+		return liveUrl
 	}
-	return "https://demo.tradovateapi.com"
+	return demoUrl
 }
 
 // GetWSBaseURL returns the Market Data WebSocket API base URL for the given environment
 func GetMDWSBaseURL(environment string) string {
 
 	if environment == "live" {
-		return "wss://md-live.tradovateapi.com/v1/websocket"
+		return mdLiveWSUrl
 	}
-	return "wss://md-demo.tradovateapi.com/v1/websocket"
+	return mdDemoWSUrl
 }
 
 // GetWSBaseURL returns the WebSocket API base URL for the given environment
 func GetWSBaseURL(environment string) string {
 
 	if environment == "live" {
-		return "wss://live.tradovateapi.com/v1/websocket"
+		return baseLiveWSUrl
 	}
-	return "wss://demo.tradovateapi.com/v1/websocket"
+	return baseDemoWSUrl
 }
 
 // GetConfigPath returns the absolute path to the config file
@@ -124,7 +135,7 @@ func CreateDefaultConfig(path string) error {
 			Chl:         "your_chl_here",
 			Cid:         "your_cid_here",
 			DeviceID:    "your_device_id_here",
-			Environment: "demo",
+			Environment: "'live' or 'demo'",
 			Username:    "your_username_here",
 			Password:    "your_password_here",
 			Sec:         "your_security_token_here",
@@ -133,7 +144,6 @@ func CreateDefaultConfig(path string) error {
 		Risk: RiskConfig{
 			MaxContracts:     1,
 			DailyLossLimit:   500.0,
-			MaxOrderRetries:  3,
 			EnableRiskChecks: true,
 		},
 	}
@@ -159,7 +169,6 @@ func CreateConfigFromParams(appId, appVersion, chl, cid, deviceId, env, user, pa
 		Risk: RiskConfig{
 			MaxContracts:     maxContracts,
 			DailyLossLimit:   dailyLossLimit,
-			MaxOrderRetries:  maxOrderRetries,
 			EnableRiskChecks: enableRiskCheck,
 		},
 	}

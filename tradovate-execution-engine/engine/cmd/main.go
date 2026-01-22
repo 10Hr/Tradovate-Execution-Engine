@@ -9,6 +9,7 @@ import (
 	"tradovate-execution-engine/engine/internal/execution"
 	"tradovate-execution-engine/engine/internal/logger"
 	"tradovate-execution-engine/engine/internal/marketdata"
+	"tradovate-execution-engine/engine/internal/portfolio"
 	"tradovate-execution-engine/engine/internal/tradovate"
 	_ "tradovate-execution-engine/engine/strategies"
 )
@@ -42,7 +43,10 @@ func main() {
 	// }
 	// return
 
-	//return
+	//
+	//	PROGRAM CONTROL FLOW - USE THIS FOR WHEN
+	//
+
 	// Get the global token manager
 	tm := auth.GetTokenManager()
 
@@ -86,36 +90,23 @@ func main() {
 
 	fmt.Println("\nMarket data token aquired")
 
-	mdClient := tradovate.NewTradovateWebSocketClient(mdToken, config.Tradovate.Environment, "md")
-	mdClient.SetLogger(mainLog)
+	marketDataClient := tradovate.NewTradovateWebSocketClient(mdToken, config.Tradovate.Environment, "md")
+	marketDataClient.SetLogger(mainLog)
 
 	// Trading Client
 	tradingClient := tradovate.NewTradovateWebSocketClient(accessToken, config.Tradovate.Environment, "")
 	tradingClient.SetLogger(mainLog)
 
 	// Create Subscribers
-	mdSubscriber := tradovate.NewDataSubscriber(mdClient)
+	mdSubscriber := tradovate.NewDataSubscriber(marketDataClient)
 	mdSubscriber.SetLogger(mainLog)
 
 	tradingSubscriber := tradovate.NewDataSubscriber(tradingClient)
-
 	tradingSubscriber.SetLogger(mainLog)
 
-	mdClient.SetMessageHandler(mdSubscriber.HandleEvent)
+	// Set Handlers
+	marketDataClient.SetMessageHandler(mdSubscriber.HandleEvent)
 	tradingClient.SetMessageHandler(tradingSubscriber.HandleEvent)
-
-	// Initialize PositionManager
-
-	//userID := tm.GetUserID()
-
-	// Create and start tracker reusing connections
-
-	// tracker := portfolio.NewPortfolioTracker(tradingClient, mdClient, userID, mainLog)
-
-	// if err := tracker.Start(config.Tradovate.Environment); err != nil {
-
-	// 	fmt.Errorf("Failed to start PortfolioTracker: %v", err)
-	// }
 
 	var availableStrats []string
 	availableStrats = execution.GetAvailableStrategies()
@@ -266,11 +257,11 @@ func main() {
 				// Close previous bar if exists
 				if !barAgg.firstTick {
 					// Parse and format the timestamp
-					t, _ := time.Parse("2006-01-02T15:04Z", barAgg.currentMinute)
-					humanTime := t.Local().Format("Jan 02 3:04 PM")
+					//t, _ := time.Parse("2006-01-02T15:04Z", barAgg.currentMinute)
+					//humanTime := t.Local().Format("Jan 02 3:04 PM")
 
-					fmt.Printf("\n📊 BAR CLOSE: %s | O:%.2f H:%.2f L:%.2f C:%.2f\n",
-						humanTime, barAgg.open, barAgg.high, barAgg.low, barAgg.close)
+					// fmt.Printf("\n📊 BAR CLOSE: %s | O:%.2f H:%.2f L:%.2f C:%.2f\n",
+					// 	humanTime, barAgg.open, barAgg.high, barAgg.low, barAgg.close)
 					// Update SMAs with bar close
 					//fastValue := fastSMA.Update(barAgg.close)
 					//slowValue := slowSMA.Update(barAgg.close)
@@ -282,12 +273,12 @@ func main() {
 						s.OnBar(barAgg.currentMinute, barAgg.close)
 					}
 					livebarcounter++
-					fmt.Println("LiveBarCount: ", livebarcounter)
+					//fmt.Println("LiveBarCount: ", livebarcounter)
 					//fmt.Printf("   Fast SMA: %.2f | Slow SMA: %.2f\n", fastValue, slowValue)
 
-					fmt.Printf("   Fast SMA: %.2f | Slow SMA: %.2f\n",
-						strat.GetMetrics()["Fast SMA"],
-						strat.GetMetrics()["Slow SMA"])
+					// fmt.Printf("   Fast SMA: %.2f | Slow SMA: %.2f\n",
+					// 	strat.GetMetrics()["Fast SMA"],
+					// 	strat.GetMetrics()["Slow SMA"])
 				}
 
 				// Start new bar
@@ -341,6 +332,20 @@ func main() {
 		// 	}
 		// }()
 	}()
+
+	//Initialize PositionManager
+
+	userID := tm.GetUserID()
+
+	//Create and start tracker reusing connections
+
+	tracker := portfolio.NewPortfolioTracker(tradingClient, marketDataClient, userID, mainLog)
+
+	if err := tracker.Start(config.Tradovate.Environment); err != nil {
+
+		fmt.Errorf("Failed to start PortfolioTracker: %v", err)
+	}
+
 	// Keep the program running
 	select {}
 

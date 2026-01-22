@@ -24,6 +24,5 @@ type TradovateConfig struct {
 type RiskConfig struct {
 	MaxContracts     int     `json:"maxContracts"`
 	DailyLossLimit   float64 `json:"dailyLossLimit"`
-	MaxOrderRetries  int     `json:"maxOrderRetries"`
 	EnableRiskChecks bool    `json:"enableRiskChecks"`
 }
