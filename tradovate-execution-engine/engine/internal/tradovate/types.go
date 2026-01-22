@@ -17,8 +17,8 @@ type DataSubscriber struct {
 	log           *logger.Logger
 
 	// Custom handlers
-	OnQuoteUpdate    func(quote marketdata.Quote)
-	OnChartUpdate    func(chart marketdata.ChartUpdate)
+	OnQuoteUpdate    []func(quote marketdata.Quote)
+	OnChartUpdate    []func(chart marketdata.ChartUpdate)
 	OnOrderUpdate    func(data json.RawMessage)
 	OnPositionUpdate func(data json.RawMessage)
 	OnUserSync       func(data json.RawMessage)

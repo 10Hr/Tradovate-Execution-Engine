@@ -23,16 +23,26 @@ func (s *DataSubscriber) SetLogger(l *logger.Logger) {
 	s.log = l
 }
 
+// IsConnected returns whether the underlying client is connected
+func (s *DataSubscriber) IsConnected() bool {
+	return s.client.IsConnected()
+}
+
+// Connect attempts to connect the underlying client
+func (s *DataSubscriber) Connect() error {
+	return s.client.Connect()
+}
+
 // HandleEvent processes incoming market data events
 func (s *DataSubscriber) HandleEvent(eventType string, data json.RawMessage) {
 	switch eventType {
 	case marketdata.EventMarketData:
 		s.handleMarketData(data)
-	case marketdata.EventChart:
+	case marketdata.EventChart, "md/getchart":
 		s.handleChartData(data)
 	case marketdata.EventUser:
 		if s.log != nil {
-			s.log.Infof("Event Received: %s", eventType)
+			/*s.log.Infof*/ fmt.Printf("Event Received: %s\n", eventType)
 		}
 		// User sync often contains positions and orders
 		if s.OnUserSync != nil {
@@ -52,13 +62,27 @@ func (s *DataSubscriber) HandleEvent(eventType string, data json.RawMessage) {
 	case "md/subscribequote", "md/unsubscribequote", "md/subscribechart", "md/unsubscribechart":
 		// These are response confirmations for requests, ignore them to avoid "Unknown event type" warnings
 		if s.log != nil {
-			s.log.Debugf("Confirmation received for: %s", eventType)
+			/*s.log.Debugf*/ fmt.Printf("\nConfirmation received for: %s", eventType)
 		}
 	default:
 		if s.log != nil {
-			s.log.Warnf("Unknown event type: %s", eventType)
+			/*s.log.Warnf*/ fmt.Printf("Unknown event type: %s", eventType)
 		}
 	}
+}
+
+// AddQuoteHandler adds a callback for quote updates
+func (s *DataSubscriber) AddQuoteHandler(handler func(marketdata.Quote)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.OnQuoteUpdate = append(s.OnQuoteUpdate, handler)
+}
+
+// AddChartHandler adds a callback for chart updates
+func (s *DataSubscriber) AddChartHandler(handler func(marketdata.ChartUpdate)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.OnChartUpdate = append(s.OnChartUpdate, handler)
 }
 
 // handlePropsEvent handles incremental updates
@@ -69,7 +93,7 @@ func (s *DataSubscriber) handlePropsEvent(data json.RawMessage) {
 	}
 	if err := json.Unmarshal(data, &props); err != nil {
 		if s.log != nil {
-			s.log.Warnf("Failed to parse props event: %v", err)
+			/*s.log.Warnf*/ fmt.Printf("Failed to parse props event: %v", err)
 		}
 		return
 	}
@@ -124,15 +148,19 @@ func (s *DataSubscriber) handleMarketData(data json.RawMessage) {
 	quoteData, err := marketdata.ParseQuoteData(data)
 	if err != nil {
 		if s.log != nil {
-			s.log.Errorf("Error unmarshaling quote data: %v", err)
+			/*s.log.Errorf*/ fmt.Printf("Error unmarshaling quote data: %v", err)
 		}
 		return
 	}
 
+	s.mu.RLock()
+	handlers := s.OnQuoteUpdate
+	s.mu.RUnlock()
+
 	for _, quote := range quoteData.Quotes {
-		// Call custom handler if set
-		if s.OnQuoteUpdate != nil {
-			s.OnQuoteUpdate(quote)
+		// Call custom handlers if set
+		for _, handler := range handlers {
+			handler(quote)
 		}
 	}
 }
@@ -141,33 +169,39 @@ func (s *DataSubscriber) handleMarketData(data json.RawMessage) {
 func (s *DataSubscriber) handleChartData(data json.RawMessage) {
 	chartUpdate, err := marketdata.ParseChartData(data)
 	if err != nil {
-		if s.log != nil {
-			s.log.Errorf("Error unmarshaling chart data: %v", err)
+		// Try to parse as single chart (sometimes md/getchart returns this in some cases)
+		var singleChart marketdata.Chart
+		if err2 := json.Unmarshal(data, &singleChart); err2 == nil {
+			chartUpdate = &marketdata.ChartUpdate{Charts: []marketdata.Chart{singleChart}}
+		} else {
+			if s.log != nil {
+				/*s.log.Errorf*/ fmt.Printf("Error unmarshaling chart data: %v, payload: %s", err, string(data))
+			}
+			return
 		}
-		return
 	}
 
 	for _, chart := range chartUpdate.Charts {
 		if len(chart.Ticks) > 0 {
 			if s.log != nil {
-				s.log.Debugf("Tick data received - Chart ID: %d, Ticks: %d", chart.ID, len(chart.Ticks))
-				for _, tick := range chart.Ticks {
-					s.log.Debugf("  Tick: %s - Price: %.2f, Size: %.0f",
-						tick.Timestamp, tick.Price, tick.Size)
-				}
+				/*s.log.Debugf*/ fmt.Printf("Tick data received - Chart ID: %d, Ticks: %d", chart.ID, len(chart.Ticks))
 			}
 		}
 
 		if len(chart.Bars) > 0 {
 			if s.log != nil {
-				s.log.Debugf("Bar data received - Chart ID: %d, Bars: %d", chart.ID, len(chart.Bars))
+				/*s.log.Debugf*/ fmt.Printf("Bar data received - Chart ID: %d, Bars: %d", chart.ID, len(chart.Bars))
 			}
 		}
 	}
 
-	// Call custom handler if set
-	if s.OnChartUpdate != nil {
-		s.OnChartUpdate(*chartUpdate)
+	s.mu.RLock()
+	handlers := s.OnChartUpdate
+	s.mu.RUnlock()
+
+	// Call custom handlers if set
+	for _, handler := range handlers {
+		handler(*chartUpdate)
 	}
 }
 
@@ -194,7 +228,7 @@ func (s *DataSubscriber) SubscribeQuote(symbol interface{}) error {
 	s.mu.Unlock()
 
 	if s.log != nil {
-		s.log.Infof("Subscribed to quotes for %v", symbol)
+		/*s.log.Infof*/ fmt.Printf("Subscribed to quotes for %v", symbol)
 	}
 	return nil
 }
@@ -215,7 +249,7 @@ func (s *DataSubscriber) UnsubscribeQuote(symbol interface{}) error {
 	s.mu.Unlock()
 
 	if s.log != nil {
-		s.log.Infof("Unsubscribed from quotes for %v", symbol)
+		/*s.log.Infof*/ fmt.Printf("Unsubscribed from quotes for %v", symbol)
 	}
 	return nil
 }
@@ -239,7 +273,34 @@ func (s *DataSubscriber) SubscribeTickChart(symbol interface{}) error {
 	s.mu.Unlock()
 
 	if s.log != nil {
-		s.log.Infof("Subscribed to tick chart for %v", symbol)
+		/*s.log.Infof*/ fmt.Printf("Subscribed to tick chart for %v", symbol)
+	}
+	return nil
+}
+
+// SubscribeMinuteChart subscribes to real-time minute bar data
+func (s *DataSubscriber) SubscribeMinuteChart(symbol interface{}) error {
+	params := map[string]interface{}{
+		"symbol": symbol,
+		"chartDescription": map[string]interface{}{
+			"underlyingType":  "MinuteBar",
+			"elementSize":     1,
+			"elementSizeUnit": "UnderlyingUnits",
+		},
+	}
+
+	if err := s.client.Send("md/subscribechart", params); err != nil {
+		fmt.Print(err)
+		return err
+	}
+
+	s.mu.Lock()
+	key := fmt.Sprintf("%s: %v", "Minute Bars ", symbol)
+	s.subscriptions[key] = fmt.Sprintf("%v", symbol)
+	s.mu.Unlock()
+
+	if s.log != nil {
+		fmt.Printf("Subscribed to minute chart for %v\n", symbol)
 	}
 	return nil
 }
@@ -260,7 +321,20 @@ func (s *DataSubscriber) UnsubscribeChart(symbol interface{}) error {
 	s.mu.Unlock()
 
 	if s.log != nil {
-		s.log.Infof("Unsubscribed from tick chart for %v", symbol)
+		/*s.log.Infof*/ fmt.Printf("Unsubscribed from tick chart for %v", symbol)
+	}
+	return nil
+}
+
+// GetChart requests chart data (historical and/or live)
+// This implements the md/getchart endpoint
+func (s *DataSubscriber) GetChart(params marketdata.HistoricalDataParams) error {
+	if err := s.client.Send("md/getchart", params); err != nil {
+		return err
+	}
+
+	if s.log != nil {
+		/*s.log.Infof*/ fmt.Printf("Requested chart data for %v", params.Symbol)
 	}
 	return nil
 }
@@ -275,7 +349,7 @@ func (s *DataSubscriber) SubscribeUserSyncRequests(users []int) error {
 	}
 
 	if s.log != nil {
-		s.log.Info("Subscribed to user sync requests")
+		/*s.log.Info*/ fmt.Println("Subscribed to user sync requests")
 	}
 	return nil
 }
@@ -296,13 +370,13 @@ func (s *DataSubscriber) UnsubscribeAll() error {
 			case marketdata.SubscriptionTypeQuote:
 				if err := s.UnsubscribeQuote(symbol); err != nil {
 					if s.log != nil {
-						s.log.Errorf("Error unsubscribing quote for %v: %v", symbol, err)
+						/*s.log.Errorf*/ fmt.Printf("Error unsubscribing quote for %v: %v", symbol, err)
 					}
 				}
 			case marketdata.SubscriptionTypeTick + ":":
 				if err := s.UnsubscribeChart(symbol); err != nil {
 					if s.log != nil {
-						s.log.Errorf("Error unsubscribing chart for %v: %v", symbol, err)
+						/*s.log.Errorf*/ fmt.Printf("Error unsubscribing chart for %v: %v", symbol, err)
 					}
 				}
 			}

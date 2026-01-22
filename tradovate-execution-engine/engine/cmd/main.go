@@ -3,12 +3,14 @@ package main
 import (
 	"fmt"
 	"os"
-	"tradovate-execution-engine/engine/UI"
+	"time"
 	"tradovate-execution-engine/engine/config"
+	"tradovate-execution-engine/engine/internal/auth"
 	"tradovate-execution-engine/engine/internal/execution"
 	"tradovate-execution-engine/engine/internal/logger"
-
-	tea "github.com/charmbracelet/bubbletea"
+	"tradovate-execution-engine/engine/internal/marketdata"
+	"tradovate-execution-engine/engine/internal/tradovate"
+	_ "tradovate-execution-engine/engine/strategies"
 )
 
 const (
@@ -33,59 +35,314 @@ func main() {
 	// Initialize OrderManager
 	orderManager := execution.NewOrderManager(config, orderLog)
 
-	// Pass to UI:
-	p := tea.NewProgram(UI.InitialModel(mainLog, orderLog, orderManager), tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		fmt.Printf("Error: %v\n", err)
-	}
-	//return
-	// Get the global token manager
-	//tm := auth.GetTokenManager()
-
-	// cfg, err := config.LoadOrCreateConfig()
-	// if err != nil {
+	// //Pass to UI:
+	// p := tea.NewProgram(UI.InitialModel(mainLog, orderLog, orderManager), tea.WithAltScreen())
+	// if _, err := p.Run(); err != nil {
 	// 	fmt.Printf("Error: %v\n", err)
 	// }
+	// return
+
+	//return
+	// Get the global token manager
+	tm := auth.GetTokenManager()
 
 	// // Set credentials
-	// tm.SetCredentials(
-	// 	cfg.Tradovate.AppID,
-	// 	cfg.Tradovate.AppVersion,
-	// 	cfg.Tradovate.Chl,
-	// 	cfg.Tradovate.Cid,
-	// 	cfg.Tradovate.DeviceID,
-	// 	cfg.Tradovate.Environment,
-	// 	cfg.Tradovate.Username,
-	// 	cfg.Tradovate.Password,
-	// 	cfg.Tradovate.Sec,
-	// 	cfg.Tradovate.Enc,
-	// )
+	tm.SetCredentials(
+		config.Tradovate.AppID,
+		config.Tradovate.AppVersion,
+		config.Tradovate.Chl,
+		config.Tradovate.Cid,
+		config.Tradovate.DeviceID,
+		config.Tradovate.Environment,
+		config.Tradovate.Username,
+		config.Tradovate.Password,
+		config.Tradovate.Sec,
+		config.Tradovate.Enc,
+	)
 
 	// // Authenticate
-	// if err := tm.Authenticate(); err != nil {
-	// 	fmt.Println("Authentication error:", err)
-	// 	return
-	// }
-	// fmt.Println("Authentication Successful")
+	if err := tm.Authenticate(); err != nil {
+		fmt.Println("Authentication error:", err)
+		return
+	}
+	fmt.Println("Authentication Successful")
 
 	// // Now you can use the token in other parts of your code
-	// token, err := tm.GetAccessToken()
-	// if err != nil {
-	// 	fmt.Println("Error getting token:", err)
-	// 	return
+	accessToken, err := tm.GetAccessToken()
+	if err != nil {
+		fmt.Println("Error getting token:", err)
+		return
+	}
+
+	fmt.Println("\nAuth token aquired")
+
+	var mdToken string
+	mdToken, err = tm.GetMDAccessToken()
+
+	if err != nil {
+		fmt.Println("Error getting market data token:", err)
+		return
+	}
+
+	fmt.Println("\nMarket data token aquired")
+
+	mdClient := tradovate.NewTradovateWebSocketClient(mdToken, config.Tradovate.Environment, "md")
+	mdClient.SetLogger(mainLog)
+
+	// Trading Client
+	tradingClient := tradovate.NewTradovateWebSocketClient(accessToken, config.Tradovate.Environment, "")
+	tradingClient.SetLogger(mainLog)
+
+	// Create Subscribers
+	mdSubscriber := tradovate.NewDataSubscriber(mdClient)
+	mdSubscriber.SetLogger(mainLog)
+
+	tradingSubscriber := tradovate.NewDataSubscriber(tradingClient)
+
+	tradingSubscriber.SetLogger(mainLog)
+
+	mdClient.SetMessageHandler(mdSubscriber.HandleEvent)
+	tradingClient.SetMessageHandler(tradingSubscriber.HandleEvent)
+
+	// Initialize PositionManager
+
+	//userID := tm.GetUserID()
+
+	// Create and start tracker reusing connections
+
+	// tracker := portfolio.NewPortfolioTracker(tradingClient, mdClient, userID, mainLog)
+
+	// if err := tracker.Start(config.Tradovate.Environment); err != nil {
+
+	// 	fmt.Errorf("Failed to start PortfolioTracker: %v", err)
 	// }
 
-	// fmt.Println("\nAuth token aquired")
+	var availableStrats []string
+	availableStrats = execution.GetAvailableStrategies()
+	fmt.Printf("Discovered %d registered strategies: %v\n", len(availableStrats), availableStrats)
 
-	// var mdToken string
-	// mdToken, err = tm.GetMDAccessToken()
+	strat, err := execution.CreateStrategy("ma_crossover")
 
-	// if err != nil {
-	// 	fmt.Println("Error getting market data token:", err)
-	// 	return
-	// }
+	fmt.Println("\nStrategy", strat.GetParams())
 
-	// fmt.Println("\nMarket data token aquired")
+	strat.SetParam("fast_length", "2")
+	strat.SetParam("slow_length", "5")
+
+	if err := strat.Init(orderManager); err != nil {
+		fmt.Println("Failed to initialize strategy: " + err.Error())
+		return
+	}
+
+	params := strat.GetParams()
+
+	fmt.Println(params)
+
+	var symbol string
+	for _, param := range params {
+		if param.Name == "symbol" {
+			symbol = param.Value // Get the VALUE which is "MESH6"
+			break
+		}
+	}
+
+	// Create SMAs BEFORE the handler (outside, at the same level as AddChartHandler)
+	//fastSMA := indicators.NewSMA(5, indicators.OnBarClose)
+	//slowSMA := indicators.NewSMA(15, indicators.OnBarClose)
+	// Track last bar to avoid exact duplicates
+	type LastBar struct {
+		Timestamp string
+		Close     float64
+	}
+	var lastBar LastBar
+
+	var historicalLoaded bool
+	mdSubscriber.AddChartHandler(func(update marketdata.ChartUpdate) {
+		fmt.Printf("\n🔔 CHART UPDATE RECEIVED at %s\n", time.Now().Format("15:04:05"))
+		fmt.Printf("📊 Chart handler called with %d charts\n", len(update.Charts))
+
+		for _, chart := range update.Charts {
+			fmt.Printf("Chart ID: %d | Bars: %d | Ticks: %d | EOH: %v\n",
+				chart.ID, len(chart.Bars), len(chart.Ticks), chart.EOH)
+
+			// Check for end of history marker
+			if chart.EOH {
+				fmt.Println("✅ End of historical data - now receiving live updates")
+				fmt.Printf("📊 SMAs initialized - Fast: %.2f | Slow: %.2f\n",
+					strat.GetMetrics()["Fast SMA"],
+					strat.GetMetrics()["Slow SMA"])
+
+				// Enable strategy for live trading
+				if s, ok := strat.(interface{ SetEnabled(bool) }); ok {
+					s.SetEnabled(true)
+					fmt.Println("🚀 Strategy enabled for LIVE trading")
+				}
+
+				historicalLoaded = true
+				continue
+			}
+
+			fmt.Printf("\n=== Chart ID: %d ===\n", chart.ID)
+			fmt.Printf("Number of bars: %d\n", len(chart.Bars))
+
+			if !historicalLoaded {
+				// Process each bar
+				for i, bar := range chart.Bars {
+					// Skip only exact duplicates (same timestamp AND same close price)
+					if bar.Timestamp == lastBar.Timestamp && bar.Close == lastBar.Close {
+						fmt.Printf("  ⏭️  Skipping duplicate bar at %s\n", bar.Timestamp)
+						continue
+					}
+					lastBar = LastBar{Timestamp: bar.Timestamp, Close: bar.Close}
+
+					// Update SMAs with bar close price
+					// fastValue := fastSMA.Update(bar.Close)
+					// slowValue := slowSMA.Update(bar.Close)
+
+					// Update Strategy
+					if s, ok := strat.(interface {
+						OnBar(string, float64) error
+					}); ok {
+						s.OnBar(bar.Timestamp, bar.Close)
+					}
+
+					// Parse and format time for display
+					t, err := time.Parse("2006-01-02T15:04Z", bar.Timestamp)
+					humanTime := bar.Timestamp
+					if err == nil {
+						humanTime = t.Local().Format("Jan 02 3:04 PM")
+					}
+
+					// Print bar with SMA values
+					fmt.Printf("Bar %d: %s | C=%.2f | Fast SMA(5)=%.2f | Slow SMA(15)=%.2f\n",
+						i+1,
+						humanTime,
+						bar.Close,
+						strat.GetMetrics()["Fast SMA"],
+						strat.GetMetrics()["Slow SMA"])
+				}
+
+				fmt.Printf("📊 Current Fast SMA: %.2f | Slow SMA: %.2f\n",
+					strat.GetMetrics()["Fast SMA"],
+					strat.GetMetrics()["Slow SMA"])
+				// fastSMA.CurrentValue(),
+				// slowSMA.CurrentValue())
+			}
+		}
+	})
+
+	// Bar aggregator - collects quotes into minute bars
+	type BarAggregator struct {
+		currentMinute string
+		open          float64
+		high          float64
+		low           float64
+		close         float64
+		firstTick     bool
+	}
+
+	var barAgg = &BarAggregator{firstTick: true}
+
+	livebarcounter := 0
+
+	mdSubscriber.AddQuoteHandler(func(quote marketdata.Quote) {
+
+		if !historicalLoaded {
+			return
+		}
+
+		if trade, ok := quote.Entries["Trade"]; ok {
+			price := trade.Price
+
+			// Use the quote's actual timestamp, not time.Now()
+			quoteTime, err := time.Parse(time.RFC3339, quote.Timestamp)
+			if err != nil {
+				return
+			}
+
+			currentMinute := quoteTime.UTC().Truncate(time.Minute).Format("2006-01-02T15:04Z")
+
+			// New minute = new bar
+			if currentMinute != barAgg.currentMinute {
+				// Close previous bar if exists
+				if !barAgg.firstTick {
+					// Parse and format the timestamp
+					t, _ := time.Parse("2006-01-02T15:04Z", barAgg.currentMinute)
+					humanTime := t.Local().Format("Jan 02 3:04 PM")
+
+					fmt.Printf("\n📊 BAR CLOSE: %s | O:%.2f H:%.2f L:%.2f C:%.2f\n",
+						humanTime, barAgg.open, barAgg.high, barAgg.low, barAgg.close)
+					// Update SMAs with bar close
+					//fastValue := fastSMA.Update(barAgg.close)
+					//slowValue := slowSMA.Update(barAgg.close)
+
+					// Update Strategy
+					if s, ok := strat.(interface {
+						OnBar(string, float64) error
+					}); ok {
+						s.OnBar(barAgg.currentMinute, barAgg.close)
+					}
+					livebarcounter++
+					fmt.Println("LiveBarCount: ", livebarcounter)
+					//fmt.Printf("   Fast SMA: %.2f | Slow SMA: %.2f\n", fastValue, slowValue)
+
+					fmt.Printf("   Fast SMA: %.2f | Slow SMA: %.2f\n",
+						strat.GetMetrics()["Fast SMA"],
+						strat.GetMetrics()["Slow SMA"])
+				}
+
+				// Start new bar
+				barAgg.currentMinute = currentMinute
+				barAgg.open = price
+				barAgg.high = price
+				barAgg.low = price
+				barAgg.close = price
+				barAgg.firstTick = false
+			} else {
+				// Update current bar
+				if price > barAgg.high {
+					barAgg.high = price
+				}
+				if price < barAgg.low {
+					barAgg.low = price
+				}
+				barAgg.close = price
+			}
+		}
+	})
+
+	go func() {
+		mdSubscriber.Connect()
+		mdSubscriber.SubscribeQuote(symbol)
+
+		mdparams := marketdata.HistoricalDataParams{
+			Symbol: symbol,
+			ChartDescription: marketdata.ChartDesc{
+				UnderlyingType:  "MinuteBar",
+				ElementSize:     1,
+				ElementSizeUnit: "UnderlyingUnits",
+			},
+			TimeRange: marketdata.TimeRange{
+				ClosestTimestamp: time.Now().Format(time.RFC3339),
+				AsMuchAsElements: 25,
+			},
+		}
+		err2 := mdSubscriber.GetChart(mdparams)
+		if err2 != nil {
+			fmt.Printf("\nFailed to get chart: %v\n", err2)
+		}
+
+		// Add this heartbeat check
+		// ticker := time.NewTicker(10 * time.Second)
+		// go func() {
+		// 	for range ticker.C {
+		// 		fmt.Printf("⏰ Heartbeat: %s - WS Connected: %v EST\n",
+		// 			time.Now().Format("15:04:05"),
+		// 			mdClient.IsConnected())
+		// 	}
+		// }()
+	}()
+	// Keep the program running
+	select {}
 
 	// //
 	// // Get account ID first

@@ -5,6 +5,8 @@ import "encoding/json"
 // WebSocketSender is an interface for sending messages through WebSocket
 type WebSocketSender interface {
 	Send(url string, body interface{}) error
+	IsConnected() bool
+	Connect() error
 }
 
 // Market data structures
@@ -33,6 +35,7 @@ type Chart struct {
 	Bars      []Bar  `json:"bars,omitempty"`
 	Ticks     []Tick `json:"ticks,omitempty"`
 	Timestamp string `json:"timestamp,omitempty"`
+	EOH       bool   `json:"eoh,omitempty"`
 }
 
 type Bar struct {
@@ -74,9 +77,10 @@ type ChartDesc struct {
 }
 
 type TimeRange struct {
-	ClosestTimestamp string `json:"closestTimestamp,omitempty"` // ISO 8601 format
-	ClosestTickID    int    `json:"closestTickId,omitempty"`
-	AsFarAsTimestamp string `json:"asFarAsTimestamp,omitempty"` // ISO 8601 format
+	ClosestTimestamp string `json:"closestTimestamp,omitempty"`
+	ClosestTickId    int    `json:"closestTickId,omitempty"`
+	AsFarAsTimestamp string `json:"asFarAsTimestamp,omitempty"`
+	AsMuchAsElements int    `json:"asMuchAsElements,omitempty"`
 }
 
 // Event types

@@ -11,6 +11,7 @@ import (
 	"tradovate-execution-engine/engine/internal/auth"
 	"tradovate-execution-engine/engine/internal/execution"
 	"tradovate-execution-engine/engine/internal/logger"
+	"tradovate-execution-engine/engine/internal/marketdata"
 	"tradovate-execution-engine/engine/internal/models"
 	"tradovate-execution-engine/engine/internal/portfolio"
 	"tradovate-execution-engine/engine/internal/tradovate"
@@ -74,6 +75,7 @@ const (
 	TabPositions
 	TabOrders
 	TabExecutions
+	TabStrategy
 	TabCommands
 	configFile = "config.json"
 )
@@ -130,6 +132,16 @@ type PnLDataPoint struct {
 	PnL  float64
 }
 
+type StrategyState struct {
+	Name              string
+	Active            bool
+	Params            []execution.StrategyParam
+	Instance          execution.Strategy
+	Symbol            string
+	Description       string
+	ReceivedFirstData bool
+}
+
 type model struct {
 	activeTab            Tab
 	mode                 mode
@@ -146,6 +158,7 @@ type model struct {
 	scrollOffset         int
 	logScrollOffset      int
 	orderLogScrollOffset int
+	stratLogScrollOffset int
 
 	// Editor
 	configEditor textarea.Model
@@ -153,8 +166,9 @@ type model struct {
 	editorTitle  string
 
 	// Logger
-	mainLogger  *logger.Logger
-	orderLogger *logger.Logger
+	mainLogger     *logger.Logger
+	orderLogger    *logger.Logger
+	strategyLogger *logger.Logger
 
 	// Data
 	positions  []Position
@@ -173,6 +187,12 @@ type model struct {
 	configPath    string
 	strategyName  string
 	currentSymbol string
+
+	// Strategy Management
+	availableStrategies []string
+	selectedStrategy    string
+	currentStrategy     *StrategyState
+	strategyParams      map[string]string
 
 	// Order Manager
 	orderManager     *execution.OrderManager
@@ -194,6 +214,7 @@ func InitialModel(mainLog, orderLog *logger.Logger, om *execution.OrderManager) 
 	if orderLog == nil {
 		orderLog = logger.NewLogger(500)
 	}
+	strategyLog := logger.NewLogger(500)
 
 	// Initial log messages
 	mainLog.Println("System initialized")
@@ -209,6 +230,20 @@ func InitialModel(mainLog, orderLog *logger.Logger, om *execution.OrderManager) 
 	ta.Placeholder = "Config content..."
 	ta.Focus()
 
+	availableStrats := execution.GetAvailableStrategies()
+	mainLog.Infof("Discovered %d registered strategies: %v", len(availableStrats), availableStrats)
+
+	// Also check physical folder for visibility
+	stratDir := filepath.Join(config.GetProjectRoot(), "engine", "strategies")
+	files, err := os.ReadDir(stratDir)
+	if err == nil {
+		for _, file := range files {
+			if !file.IsDir() && strings.HasSuffix(file.Name(), ".go") {
+				mainLog.Infof("Found strategy file on disk: %s", file.Name())
+			}
+		}
+	}
+
 	return model{
 		activeTab:            TabMain,
 		mode:                 modeNormal,
@@ -217,15 +252,19 @@ func InitialModel(mainLog, orderLog *logger.Logger, om *execution.OrderManager) 
 		totalPnL:             0,
 		mainLogger:           mainLog,
 		orderLogger:          orderLog,
+		strategyLogger:       strategyLog,
 		orderManager:         om,
 		configPath:           config.GetConfigPath(),
 		strategyName:         "No strategy selected",
 		currentSymbol:        symbol,
 		logScrollOffset:      1000000,
 		orderLogScrollOffset: 1000000,
+		stratLogScrollOffset: 1000000,
 		commandHistory:       []string{},
 		historyIndex:         0,
 		configEditor:         ta,
+		availableStrategies:  availableStrats,
+		strategyParams:       make(map[string]string),
 
 		// Empty data - will be populated from OrderManager
 		positions:  []Position{},
@@ -500,6 +539,10 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.scrollOffset = 0
 
 	case "6":
+		m.activeTab = TabStrategy
+		m.scrollOffset = 0
+
+	case "7":
 		m.activeTab = TabCommands
 		m.scrollOffset = 0
 
@@ -1186,6 +1229,183 @@ func (m model) executeCommand() (model, tea.Cmd) {
 		m.activeTab = TabCommands
 		m.statusMsg = "Switched to Commands"
 
+	case "strategy":
+		if m.currentStrategy != nil && m.currentStrategy.Active {
+			m.errorMsg = "Cannot change strategy while running. Stop it first"
+			return m, nil
+		}
+		if len(parts) < 2 {
+			m.errorMsg = "Usage: :strategy <name>"
+			return m, nil
+		}
+		stratName := parts[1]
+		strat, err := execution.CreateStrategy(stratName)
+		if err != nil {
+			m.errorMsg = "Failed to load strategy: " + err.Error()
+			return m, nil
+		}
+
+		m.selectedStrategy = stratName
+		m.currentStrategy = &StrategyState{
+			Name:        strat.Name(),
+			Params:      strat.GetParams(),
+			Instance:    strat,
+			Description: strat.Description(),
+		}
+		// Reset params
+		m.strategyParams = make(map[string]string)
+		for _, p := range m.currentStrategy.Params {
+			m.strategyParams[p.Name] = fmt.Sprintf("%v", p.Value)
+		}
+
+		m.strategyName = strat.Name()
+		m.statusMsg = successStyle.Render("Loaded strategy: " + strat.Name())
+		m.strategyLogger.Printf("Loaded strategy: %s", strat.Name())
+
+	case "set":
+		if m.currentStrategy != nil && m.currentStrategy.Active {
+			m.errorMsg = "Cannot change parameters while strategy is running. Stop it first"
+			return m, nil
+		}
+		if m.currentStrategy == nil {
+			m.errorMsg = "No strategy selected. Use :strategy <name> first"
+			return m, nil
+		}
+		if len(parts) < 3 {
+			m.errorMsg = "Usage: :set <param> <value>"
+			return m, nil
+		}
+		paramName := parts[1]
+		paramValue := parts[2]
+
+		found := false
+		for _, p := range m.currentStrategy.Params {
+			if p.Name == paramName {
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			m.errorMsg = "Unknown parameter: " + paramName
+			return m, nil
+		}
+
+		m.strategyParams[paramName] = paramValue
+		m.statusMsg = successStyle.Render(fmt.Sprintf("Set %s = %s", paramName, paramValue))
+		m.strategyLogger.Printf("Parameter set: %s = %s", paramName, paramValue)
+
+	case "start":
+		if m.currentStrategy == nil {
+			m.errorMsg = "No strategy selected"
+			return m, nil
+		}
+		if m.currentStrategy.Active {
+			m.errorMsg = "Strategy is already running"
+			return m, nil
+		}
+		if !m.connected {
+			m.errorMsg = "Must be connected to start strategy"
+			return m, nil
+		}
+
+		// Apply params
+		for k, v := range m.strategyParams {
+			if err := m.currentStrategy.Instance.SetParam(k, v); err != nil {
+				m.errorMsg = "Failed to set param " + k + ": " + err.Error()
+				return m, nil
+			}
+		}
+
+		// Init strategy
+		if err := m.currentStrategy.Instance.Init(m.orderManager); err != nil {
+			m.errorMsg = "Failed to initialize strategy: " + err.Error()
+			return m, nil
+		}
+
+		m.currentStrategy.Active = true
+		m.currentStrategy.Symbol = m.strategyParams["symbol"]
+		m.currentStrategy.ReceivedFirstData = false
+		m.statusMsg = successStyle.Render("Strategy STARTED")
+		m.strategyLogger.Println(">>> STRATEGY STARTED <<<")
+
+		// Subscribe to chart data if symbol is set
+		symbol := m.strategyParams["symbol"]
+		if symbol != "" {
+			m.strategyLogger.Printf("Subscribing to data for %s", symbol)
+			if m.mdSubscriber != nil {
+				go func() {
+					// Ensure we are connected
+					if !m.mdSubscriber.IsConnected() {
+						m.strategyLogger.Warn("No Market Data Connection. Attempting to connect...")
+						if err := m.mdSubscriber.Connect(); err != nil {
+							m.strategyLogger.Errorf("Failed to connect to market data: %v", err)
+							return
+						}
+						m.strategyLogger.Info("Market data connection established")
+					}
+
+					// 1. Subscribe to Quotes for real-time price updates
+					if err := m.mdSubscriber.SubscribeQuote(symbol); err != nil {
+						m.strategyLogger.Errorf("Failed to subscribe to quotes: %v", err)
+					}
+
+					// 2. Calculate lookback time
+					// Hardcoded to 25 minutes as requested
+					lookbackMinutes := 25
+
+					startTime := time.Now().Add(time.Duration(-lookbackMinutes) * time.Minute)
+					m.strategyLogger.Infof("Requesting %d minutes of historical data for initialization...", lookbackMinutes)
+					// 3. Request Chart for historical and live data
+					params := marketdata.HistoricalDataParams{
+						Symbol: symbol,
+						ChartDescription: marketdata.ChartDesc{
+							UnderlyingType:  "MinuteBar",
+							ElementSize:     1,
+							ElementSizeUnit: "UnderlyingUnits",
+						},
+						TimeRange: marketdata.TimeRange{
+							ClosestTimestamp: startTime.Format(time.RFC3339),
+						},
+					}
+					err := m.mdSubscriber.GetChart(params)
+					if err != nil {
+						m.strategyLogger.Errorf("Failed to subscribe to chart: %v", err)
+					}
+				}()
+			}
+		}
+
+	case "stop":
+		if m.currentStrategy == nil {
+			return m, nil
+		}
+		if !m.currentStrategy.Active {
+			m.errorMsg = "Strategy is not running"
+			return m, nil
+		}
+
+		// Unsubscribe from chart/quote
+		symbol := m.strategyParams["symbol"]
+		if symbol != "" && m.mdSubscriber != nil {
+			m.strategyLogger.Printf("Unsubscribing from data for %s...", symbol)
+			go func() {
+				if err := m.mdSubscriber.UnsubscribeChart(symbol); err != nil {
+					m.strategyLogger.Warnf("Unsubscribe chart failed: %v", err)
+				}
+				if err := m.mdSubscriber.UnsubscribeQuote(symbol); err != nil {
+					m.strategyLogger.Warnf("Unsubscribe quote failed: %v", err)
+				}
+			}()
+		}
+
+		// Reset strategy instance state so it can be re-initialized
+		m.currentStrategy.Instance.Reset()
+		m.currentStrategy.Active = false
+
+		m.statusMsg = "Strategy STOPPED"
+		m.strategyLogger.Println(">>> STRATEGY STOPPED <<<")
+
 	default:
 		m.errorMsg = fmt.Sprintf("Unknown command: %s", parts[0])
 	}
@@ -1223,7 +1443,7 @@ func (m model) View() string {
 func (m model) renderTabs() string {
 	tabs := []string{}
 
-	tabNames := []string{"Main", "Order Mgmt", "Positions", "Orders", "Executions", "Commands"}
+	tabNames := []string{"Main", "Order Mgmt", "Positions", "Orders", "Executions", "Strategy", "Commands"}
 	for i, name := range tabNames {
 		style := inactiveTabStyle
 		if Tab(i) == m.activeTab {
@@ -1263,6 +1483,9 @@ func (m model) renderContent() string {
 		content = m.renderOrders()
 	case TabExecutions:
 		content = m.renderExecutions()
+	case TabStrategy:
+		content = m.renderStrategyTab(contentHeight)
+		return content
 	case TabCommands:
 		content = m.renderCommandsScrollable(contentHeight)
 		return contentStyle.Width(m.width - 4).Render(content)
@@ -1627,6 +1850,118 @@ func (m model) renderOrderManagement(contentHeight int) string {
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, leftContent, rightContent)
 }
+func (m model) renderStrategyTab(contentHeight int) string {
+	// Total available width
+	availableWidth := m.width
+
+	// Split 25/25/50
+	leftWidth := (availableWidth * 25) / 100
+	midWidth := (availableWidth * 25) / 100
+	rightWidth := availableWidth - leftWidth - midWidth
+
+	// Adjust for borders/padding
+	leftWidth -= 2
+	midWidth -= 2
+	rightWidth -= 2
+
+	if leftWidth < 20 {
+		leftWidth = 20
+	}
+	if midWidth < 20 {
+		midWidth = 20
+	}
+	if rightWidth < 20 {
+		rightWidth = 20
+	}
+
+	// Left panel - Strategy Selection and Params
+	var leftPanel strings.Builder
+	leftPanel.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")).Render("═══ STRATEGY CONTROL ═══") + "\n\n")
+
+	// Strategy Status
+	statusColor := "196" // Red
+	statusText := "INACTIVE"
+	if m.currentStrategy != nil && m.currentStrategy.Active {
+		if m.currentStrategy.ReceivedFirstData {
+			statusColor = "46" // Green
+			statusText = "RUNNING"
+		} else {
+			statusColor = "214" // Orange
+			statusText = "STARTING..."
+		}
+	}
+
+	leftPanel.WriteString("Status: " + lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor)).Bold(true).Render(statusText) + "\n\n")
+
+	// Available Strategies
+	leftPanel.WriteString(lipgloss.NewStyle().Bold(true).Render("Available Strategies:") + "\n")
+	for _, s := range m.availableStrategies {
+		prefix := "  "
+		style := lipgloss.NewStyle()
+		if s == m.selectedStrategy {
+			prefix = "> "
+			style = menuItemStyle
+		}
+		leftPanel.WriteString(style.Render(prefix+s) + "\n")
+	}
+	leftPanel.WriteString("\n")
+
+	// Strategy Configuration
+	if m.currentStrategy != nil {
+		leftPanel.WriteString(lipgloss.NewStyle().Bold(true).Render("Configuration:") + "\n")
+		for _, p := range m.currentStrategy.Params {
+			val := m.strategyParams[p.Name]
+			if val == "" {
+				val = fmt.Sprintf("%v", p.Value)
+			}
+			leftPanel.WriteString(fmt.Sprintf("  %-12s: %s\n", p.Name, val))
+		}
+		leftPanel.WriteString("\n")
+
+		leftPanel.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("Commands:") + "\n")
+		leftPanel.WriteString("  :strategy <name>\n")
+		leftPanel.WriteString("  :set <param> <val>\n")
+		leftPanel.WriteString("  :start | :stop\n")
+	}
+
+	leftContent := lipgloss.NewStyle().
+		Width(leftWidth).
+		Height(contentHeight).
+		Padding(1).
+		Render(leftPanel.String())
+
+	// Middle panel - Param View (Real-time Metrics)
+	var midPanel strings.Builder
+	midPanel.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")).Render("═══ PARAM VIEW ═══") + "\n\n")
+
+	if m.currentStrategy != nil && m.currentStrategy.Active {
+		metrics := m.currentStrategy.Instance.GetMetrics()
+		if len(metrics) > 0 {
+			for name, val := range metrics {
+				midPanel.WriteString(fmt.Sprintf("%-12s: ", name))
+				midPanel.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Render(fmt.Sprintf("%.2f", val)) + "\n")
+			}
+		} else {
+			midPanel.WriteString("Waiting for data...")
+		}
+	} else {
+		midPanel.WriteString("Strategy not active")
+	}
+
+	midContent := lipgloss.NewStyle().
+		Width(midWidth).
+		Height(contentHeight).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		Padding(1).
+		Render(midPanel.String())
+
+	// Right panel - Strategy Logger
+	rightContent := m.renderLogPanel(rightWidth, contentHeight, "Strategy Log", m.strategyLogger, &m.stratLogScrollOffset)
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, leftContent, midContent, rightContent)
+}
+
 func (m model) renderPositions() string {
 	if len(m.positions) == 0 {
 		return "No positions"
@@ -1928,14 +2263,99 @@ func (m model) connectCmd() tea.Cmd {
 		mdSubscriber.SetLogger(m.mainLogger)
 
 		tradingSubscriber := tradovate.NewDataSubscriber(tradingClient)
+
 		tradingSubscriber.SetLogger(m.mainLogger)
 
+		// Set WebSocket message handlers
+		mdClient.SetMessageHandler(mdSubscriber.HandleEvent)
+		tradingClient.SetMessageHandler(tradingSubscriber.HandleEvent)
+
+		// Add strategy handlers to mdSubscriber
+
+		mdSubscriber.AddChartHandler(func(update marketdata.ChartUpdate) {
+			m.mainLogger.Debugf("DEBUG: Chart handler triggered with %d charts", len(update.Charts))
+			if m.currentStrategy != nil && m.currentStrategy.Active {
+
+				for _, chart := range update.Charts {
+
+					if !m.currentStrategy.ReceivedFirstData && (len(chart.Bars) > 0 || len(chart.Ticks) > 0) {
+
+						m.currentStrategy.ReceivedFirstData = true
+
+						m.strategyLogger.Infof(">>> MARKET REACHED (Chart): Receiving data for %s <<<", m.currentStrategy.Symbol)
+
+					}
+
+					// Log every bar for the strategy
+
+					if len(chart.Bars) > 0 {
+
+						m.strategyLogger.Infof("Received %d Historical/Live Bars", len(chart.Bars))
+
+						for _, bar := range chart.Bars {
+
+							m.strategyLogger.Infof("Bar: %s | O:%.2f H:%.2f L:%.2f C:%.2f | V:%.0f",
+
+								bar.Timestamp, bar.Open, bar.High, bar.Low, bar.Close, bar.UpVolume+bar.DownVolume)
+
+						}
+
+					}
+
+					// Process bars
+
+					for _, bar := range chart.Bars {
+
+						_ = m.currentStrategy.Instance.OnTick(bar.Close)
+
+					}
+
+					// Process ticks
+
+					for _, tick := range chart.Ticks {
+
+						_ = m.currentStrategy.Instance.OnTick(tick.Price)
+
+					}
+
+				}
+
+			}
+
+		})
+
+		mdSubscriber.AddQuoteHandler(func(quote marketdata.Quote) {
+			m.mainLogger.Debugf("DEBUG: Quote handler triggered for contract %d", quote.ContractID)
+			if m.currentStrategy != nil && m.currentStrategy.Active {
+
+				if trade, ok := quote.Entries["Trade"]; ok {
+
+					if !m.currentStrategy.ReceivedFirstData {
+
+						m.currentStrategy.ReceivedFirstData = true
+
+						m.strategyLogger.Infof(">>> MARKET REACHED (Quote): Receiving data <<<")
+
+					}
+
+					_ = m.currentStrategy.Instance.OnTick(trade.Price)
+
+				}
+
+			}
+
+		})
+
 		// Initialize PositionManager
+
 		userID := tm.GetUserID()
 
-		// Create and start tracker
-		tracker := portfolio.NewPortfolioTracker(accessToken, mdToken, userID, m.mainLogger)
+		// Create and start tracker reusing connections
+
+		tracker := portfolio.NewPortfolioTracker(tradingClient, mdClient, userID, m.mainLogger)
+
 		if err := tracker.Start(cfg.Tradovate.Environment); err != nil {
+
 			m.mainLogger.Errorf("Failed to start PortfolioTracker: %v", err)
 		}
 

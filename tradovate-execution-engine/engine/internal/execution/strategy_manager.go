@@ -21,6 +21,7 @@ type Strategy interface {
 	SetParam(name, value string) error
 	Init(om *OrderManager) error
 	OnTick(price float64) error
+	GetMetrics() map[string]float64
 	Reset()
 }
 

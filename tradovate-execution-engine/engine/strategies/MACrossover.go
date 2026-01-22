@@ -28,6 +28,10 @@ type MACrossover struct {
 	mode        indicators.UpdateMode
 	orderMgr    *execution.OrderManager
 	initialized bool
+
+	// Track last bar timestamp to avoid processing same bar multiple times
+	lastBarTimestamp string
+	enabled          bool
 }
 
 // NewMACrossover creates a new MA crossover strategy with specified parameters
@@ -38,17 +42,19 @@ func NewMACrossover(symbol string, fastLen, slowLen int, mode indicators.UpdateM
 		slowLength: slowLen,
 		mode:       mode,
 		position:   Flat,
+		enabled:    false, // Default to disabled
 	}
 }
 
 // NewDefaultMACrossover creates a new MA crossover strategy with default settings
 func NewDefaultMACrossover() *MACrossover {
 	return &MACrossover{
-		symbol:     "ES",
+		symbol:     "MESH6",
 		fastLength: 5,
 		slowLength: 15,
 		mode:       indicators.OnBarClose,
 		position:   Flat,
+		enabled:    false,
 	}
 }
 
@@ -131,6 +137,11 @@ func (m *MACrossover) SetParam(name, value string) error {
 	return nil
 }
 
+// SetEnabled enables or disables trading actions
+func (m *MACrossover) SetEnabled(enabled bool) {
+	m.enabled = enabled
+}
+
 // Init initializes the strategy with the order manager
 func (m *MACrossover) Init(om *execution.OrderManager) error {
 	if m.initialized {
@@ -150,10 +161,15 @@ func (m *MACrossover) Init(om *execution.OrderManager) error {
 	return nil
 }
 
-// OnTick processes a new price tick
+// OnTick processes a new price tick (for OnEachTick mode with quotes)
 func (m *MACrossover) OnTick(price float64) error {
 	if !m.initialized {
 		return fmt.Errorf("strategy not initialized")
+	}
+
+	// Only update and check signals if in OnEachTick mode
+	if m.mode != indicators.OnEachTick {
+		return nil
 	}
 
 	m.fastSMA.Update(price)
@@ -167,37 +183,75 @@ func (m *MACrossover) OnTick(price float64) error {
 	return m.executePositionChange(newPosition)
 }
 
-// executePositionChange handles position transitions
-func (m *MACrossover) executePositionChange(newPosition Position) error {
-	switch {
-	case m.position == Flat && newPosition == Long:
-		m.position = Long
-		_, err := m.orderMgr.SubmitMarketOrder(m.symbol, models.SideBuy, 1)
-		return err
-
-	case m.position == Flat && newPosition == Short:
-		m.position = Short
-		_, err := m.orderMgr.SubmitMarketOrder(m.symbol, models.SideSell, 1)
-		return err
-
-	case m.position == Long && newPosition == Short:
-		// if err := m.orderMgr.FlattenPosition(m.symbol); err != nil {
-		// 	return err
-		// }
-		m.position = Short
-		_, err := m.orderMgr.SubmitMarketOrder(m.symbol, models.SideSell, 1)
-		return err
-
-	case m.position == Short && newPosition == Long:
-		// if err := m.orderMgr.FlattenPosition(m.symbol); err != nil {
-		// 	return err
-		// }
-		m.position = Long
-		_, err := m.orderMgr.SubmitMarketOrder(m.symbol, models.SideBuy, 1)
-		return err
+// OnBar processes a completed bar (for OnBarClose mode)
+func (m *MACrossover) OnBar(timestamp string, price float64) error {
+	if !m.initialized {
+		return fmt.Errorf("strategy not initialized")
 	}
 
-	return nil
+	// Skip if we already processed this bar
+	if timestamp == m.lastBarTimestamp {
+		return nil
+	}
+	m.lastBarTimestamp = timestamp
+
+	// Update SMAs with bar close price
+	m.fastSMA.Update(price)
+	m.slowSMA.Update(price)
+
+	// Check for crossover signal
+	newPosition, changed := m.checkSignal(1)
+	if !changed {
+		return nil
+	}
+
+	fmt.Printf("📊 Signal detected at bar %s | Fast: %.2f | Slow: %.2f | New Position: %v\n",
+		timestamp, m.fastSMA.CurrentValue(), m.slowSMA.CurrentValue(), newPosition)
+
+	return m.executePositionChange(newPosition)
+}
+
+// executePositionChange handles position transitions
+func (m *MACrossover) executePositionChange(newPosition Position) error {
+
+	if !m.enabled {
+		fmt.Println("[Disabled] ")
+		return nil
+	}
+	var side models.OrderSide
+	var quantity int
+	var logMsg string
+
+	switch {
+	case m.position == Flat && newPosition == Long:
+		logMsg = "GOING LONG"
+		side = models.SideBuy
+		quantity = 1
+
+	case m.position == Flat && newPosition == Short:
+		logMsg = "GOING SHORT"
+		side = models.SideSell
+		quantity = 1
+
+	case m.position == Long && newPosition == Short:
+		logMsg = "REVERSING: Long → Flat"
+		side = models.SideSell
+		quantity = 1
+
+	case m.position == Short && newPosition == Long:
+		logMsg = "REVERSING: Short → Flat"
+		side = models.SideBuy
+		quantity = 1
+
+	default:
+		return nil
+	}
+
+	m.position = newPosition
+
+	fmt.Println(logMsg)
+	_, err := m.orderMgr.SubmitMarketOrder(m.symbol, side, quantity)
+	return err
 }
 
 // checkSignal checks for crossover signals
@@ -264,6 +318,18 @@ func (m *MACrossover) GetPosition() Position {
 	return m.position
 }
 
+// GetMetrics returns real-time metrics for the strategy
+func (m *MACrossover) GetMetrics() map[string]float64 {
+	metrics := make(map[string]float64)
+	if m.fastSMA != nil {
+		metrics["Fast SMA"] = m.fastSMA.Value.Get(0)
+	}
+	if m.slowSMA != nil {
+		metrics["Slow SMA"] = m.slowSMA.Value.Get(0)
+	}
+	return metrics
+}
+
 // Reset resets the strategy state
 func (m *MACrossover) Reset() {
 	if m.fastSMA != nil {
@@ -273,10 +339,11 @@ func (m *MACrossover) Reset() {
 		m.slowSMA.Reset()
 	}
 	m.position = Flat
+	m.lastBarTimestamp = ""
 	m.initialized = false
 }
 
-// Register the strategy with the global registry
+// Register the strategy with the registry
 func init() {
 	execution.Register("ma_crossover", func() execution.Strategy {
 		return NewDefaultMACrossover()

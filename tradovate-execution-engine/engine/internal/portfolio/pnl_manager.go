@@ -95,32 +95,28 @@ type PortfolioTracker struct {
 	running    bool
 	mu         sync.Mutex
 
-	// Tokens
-	accessToken   string
-	mdAccessToken string
-	userID        int
-
 	// State tracking
+	userID    int
 	positions map[int]*Position
 	contracts map[int]string
 	products  map[string]float64
 }
 
-// NewPortfolioTracker creates a new portfolio tracker
-func NewPortfolioTracker(accessToken, mdAccessToken string, userID int, log *logger.Logger) *PortfolioTracker {
+// NewPortfolioTracker creates a new portfolio tracker using existing clients
+func NewPortfolioTracker(authClient, mdClient *tradovate.TradovateWebSocketClient, userID int, log *logger.Logger) *PortfolioTracker {
 	return &PortfolioTracker{
-		plTracker:     NewPLTracker(log),
-		log:           log,
-		positions:     make(map[int]*Position),
-		contracts:     make(map[int]string),
-		products:      make(map[string]float64),
-		accessToken:   accessToken,
-		mdAccessToken: mdAccessToken,
-		userID:        userID,
+		authClient: authClient,
+		mdClient:   mdClient,
+		plTracker:  NewPLTracker(log),
+		log:        log,
+		positions:  make(map[int]*Position),
+		contracts:  make(map[int]string),
+		products:   make(map[string]float64),
+		userID:     userID,
 	}
 }
 
-// Start initializes and starts the portfolio tracker
+// Start initializes the portfolio tracker
 func (pt *PortfolioTracker) Start(environment string) error {
 	pt.mu.Lock()
 	if pt.running {
@@ -130,46 +126,22 @@ func (pt *PortfolioTracker) Start(environment string) error {
 	pt.running = true
 	pt.mu.Unlock()
 
-	//Get token manager
-	// tm := auth.GetTokenManager()
-	// tm.SetLogger(pt.log)
-
-	// // we're authenticated
-	// if !tm.IsAuthenticated() {
-	// 	return fmt.Errorf("not authenticated - please authenticate first")
-	// }
-
-	// // Get tokens
-	// accessToken, err := tm.GetAccessToken()
-	// if err != nil {
-	// 	return fmt.Errorf("failed to get access token: %w", err)
-	// }
-
-	// mdAccessToken, err := tm.GetMDAccessToken()
-	// if err != nil {
-	// 	return fmt.Errorf("failed to get MD access token: %w", err)
-	// }
-
-	// userID := tm.GetUserID()
-
-	// Create WebSocket clients
-	pt.authClient = tradovate.NewTradovateWebSocketClient(pt.accessToken, environment, "auth")
-	pt.authClient.SetLogger(pt.log)
-
-	pt.mdClient = tradovate.NewTradovateWebSocketClient(pt.mdAccessToken, environment, "md")
-	pt.mdClient.SetLogger(pt.log)
-
-	// Connect auth client
-	if err := pt.authClient.Connect(); err != nil {
-		return fmt.Errorf("failed to connect auth websocket: %w", err)
+	// Ensure clients are connected
+	if pt.authClient == nil || pt.mdClient == nil {
+		return fmt.Errorf("websocket clients not initialized")
 	}
-	pt.log.Info("Auth WebSocket connected")
 
-	// Connect market data client
-	if err := pt.mdClient.Connect(); err != nil {
-		return fmt.Errorf("failed to connect MD websocket: %w", err)
+	if !pt.authClient.IsAuthorized() {
+		if err := pt.authClient.Connect(); err != nil {
+			return fmt.Errorf("failed to connect auth websocket: %w", err)
+		}
 	}
-	pt.log.Info("Market Data WebSocket connected")
+
+	if !pt.mdClient.IsAuthorized() {
+		if err := pt.mdClient.Connect(); err != nil {
+			return fmt.Errorf("failed to connect MD websocket: %w", err)
+		}
+	}
 
 	// Create subscriber for auth client (user sync)
 	authSubscriber := tradovate.NewDataSubscriber(pt.authClient)
@@ -200,7 +172,7 @@ func (pt *PortfolioTracker) Start(environment string) error {
 		return fmt.Errorf("failed to subscribe to user sync: %w", err)
 	}
 
-	pt.log.Info("Subscribed to user sync - waiting for position data...")
+	pt.log.Info("Portfolio tracker started - subscribed to user sync")
 
 	return nil
 }
@@ -267,7 +239,7 @@ func (pt *PortfolioTracker) handleUserSync(data json.RawMessage) {
 	}
 
 	// Set up the unified quote handler once
-	pt.subscriber.OnQuoteUpdate = pt.handleQuoteUpdate
+	pt.subscriber.OnQuoteUpdate = append(pt.subscriber.OnQuoteUpdate, pt.handleQuoteUpdate)
 	pt.mu.Unlock()
 
 	// Process each position
@@ -344,9 +316,9 @@ func (pt *PortfolioTracker) handleQuoteUpdate(quote marketdata.Quote) {
 	// Calculate P&L: (current_price - buy_price) * vpp * position_size
 	pl := (price - buyPrice) * vpp * float64(pos.NetPos)
 
-	if pt.log != nil {
-		pt.log.Debugf("Quote update for %s: Price=%.2f, P&L=%.2f", contractName, price, pl)
-	}
+	// if pt.log != nil {
+	// 	pt.log.Debugf("Quote update for %s: Price=%.2f, P&L=%.2f", contractName, price, pl)
+	// }
 
 	// Update tracker
 	pt.plTracker.Update(contractName, pl, pos.NetPos, buyPrice, price)

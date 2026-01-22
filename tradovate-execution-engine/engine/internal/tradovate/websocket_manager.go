@@ -48,7 +48,7 @@ func (c *TradovateWebSocketClient) SetMessageHandler(handler MessageHandler) {
 // Connect establishes WebSocket connection and authorizes
 func (c *TradovateWebSocketClient) Connect() error {
 	if c.log != nil {
-		c.log.Infof("Connecting to WebSocket: %s", c.wsURL)
+		/*c.log.Infof*/ fmt.Printf("Connecting to WebSocket: %s", c.wsURL)
 	}
 
 	var err error
@@ -58,7 +58,7 @@ func (c *TradovateWebSocketClient) Connect() error {
 	}
 
 	if c.log != nil {
-		c.log.Info("WebSocket connected")
+		/*c.log.Info*/ fmt.Println("WebSocket connected")
 	}
 
 	// Start message handler
@@ -89,7 +89,7 @@ func (c *TradovateWebSocketClient) authorize() error {
 	authMsg := fmt.Sprintf("authorize\n1\n\n%s", c.accessToken)
 
 	if c.log != nil {
-		c.log.Info("Sending authorization...")
+		/*c.log.Info*/ fmt.Println("Sending authorization...")
 	}
 
 	c.mu.Lock()
@@ -118,7 +118,7 @@ func (c *TradovateWebSocketClient) authorize() error {
 			if c.isAuthorized {
 				c.mu.RUnlock()
 				if c.log != nil {
-					c.log.Info("✓ WebSocket authorized")
+					/*c.log.Info*/ fmt.Println("✓ WebSocket authorized")
 				}
 				return nil
 			}
@@ -154,7 +154,7 @@ func (c *TradovateWebSocketClient) Send(url string, body interface{}) error {
 	message := fmt.Sprintf("%s\n%d\n\n%s", url, requestID, jsonBody)
 
 	if c.log != nil {
-		c.log.Infof("Sending message (ID %d): %s", requestID, url)
+		/*c.log.Infof*/ fmt.Printf("Sending message (ID %d): %s", requestID, url)
 	}
 
 	return c.conn.WriteMessage(websocket.TextMessage, []byte(message))
@@ -200,14 +200,14 @@ func (c *TradovateWebSocketClient) handleMessages() {
 			c.mu.Unlock()
 
 			if c.log != nil {
-				c.log.Info("WebSocket session opened")
+				/*c.log.Info*/ fmt.Println("WebSocket session opened")
 			}
 
 		case 'h':
 			// Heartbeat frame - we send our own proactive heartbeats every 2.5s
 			// so we can just ignore the server's 'h' frame or log it.
 			if c.log != nil {
-				c.log.Debug("Received heartbeat frame from server")
+				//c.log.Debug("Received heartbeat frame from server")
 			}
 
 		case 'a':
@@ -217,7 +217,7 @@ func (c *TradovateWebSocketClient) handleMessages() {
 		case 'c':
 			// Close frame
 			if c.log != nil {
-				c.log.Infof("Server closing connection: %s", string(payload))
+				/*c.log.Infof*/ fmt.Printf("Server closing connection: %s", string(payload))
 			}
 			return
 
@@ -236,7 +236,7 @@ func (c *TradovateWebSocketClient) sendHeartbeat() {
 
 	if c.conn != nil {
 		if c.log != nil {
-			c.log.Debug("Sending heartbeat response []")
+			//c.log.Debug("Sending heartbeat response []")
 		}
 		c.conn.WriteMessage(websocket.TextMessage, []byte("[]"))
 	}
@@ -244,23 +244,26 @@ func (c *TradovateWebSocketClient) sendHeartbeat() {
 
 // handleArrayFrame processes array frames containing JSON messages
 func (c *TradovateWebSocketClient) handleArrayFrame(payload []byte) {
+
+	//fmt.Printf("\n📨 RAW RESPONSE: %s\n", string(payload))
+
+	if c.log != nil {
+		c.log.Debugf("DEBUG: Received array frame: %s", string(payload))
+	}
 	var messages []json.RawMessage
 	if err := json.Unmarshal(payload, &messages); err != nil {
 		if c.log != nil {
-			c.log.Errorf("Error unmarshaling array frame: %v, payload: %s", err, string(payload))
+			/*c.log.Errorf*/ fmt.Errorf("Error unmarshaling array frame: %v, payload: %s", err, string(payload))
 		}
 		return
 	}
 
 	for _, msg := range messages {
-		// if c.log != nil {
-		// 	c.log.Infof("WS RECV: %s", string(msg))
-		// }
 
 		var response WSResponse
 		if err := json.Unmarshal(msg, &response); err != nil {
 			if c.log != nil {
-				c.log.Errorf("Error unmarshaling message: %v", err)
+				/*c.log.Errorf*/ fmt.Errorf("Error unmarshaling message: %v", err)
 			}
 			continue
 		}
@@ -279,7 +282,7 @@ func (c *TradovateWebSocketClient) handleArrayFrame(payload []byte) {
 		// Log any errors
 		if response.Status != 0 && response.Status != 200 {
 			if c.log != nil {
-				c.log.Errorf("Error response: Status %d - %s", response.Status, response.StatusText)
+				/*c.log.Errorf*/ fmt.Errorf("Error response: Status %d - %s", response.Status, response.StatusText)
 			}
 		}
 
@@ -315,11 +318,11 @@ func (c *TradovateWebSocketClient) handleArrayFrame(payload []byte) {
 func (c *TradovateWebSocketClient) handleResponse(response WSResponse) {
 	if response.Status == 200 {
 		if c.log != nil {
-			c.log.Infof("Request %d successful", response.ID)
+			/*c.log.Infof*/ fmt.Printf("Request %d successful", response.ID)
 		}
 	} else {
 		if c.log != nil {
-			c.log.Errorf("Request %d failed: Status %d - %s", response.ID, response.Status, response.StatusText)
+			/*c.log.Errorf*/ fmt.Errorf("Request %d failed: Status %d - %s", response.ID, response.Status, response.StatusText)
 		}
 	}
 }
@@ -329,6 +332,13 @@ func (c *TradovateWebSocketClient) IsAuthorized() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.isAuthorized
+}
+
+// IsConnected returns whether the WebSocket is currently connected and authorized
+func (c *TradovateWebSocketClient) IsConnected() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.conn != nil && c.isAuthorized
 }
 
 // Disconnect closes the WebSocket connection

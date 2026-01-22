@@ -8,137 +8,107 @@ const (
 	OnBarClose
 )
 
-// DataSeries is a LIFO-indexed slice where [0] is most recent
-type DataSeries []float64
-
-// Get returns value with LIFO indexing: [0] = current, [1] = 1 bar ago, etc.
-func (ds DataSeries) Get(index int) float64 {
-	if index < 0 || len(ds) == 0 {
-		return 0
-	}
-
-	actualIndex := len(ds) - 1 - index
-	if actualIndex < 0 {
-		return 0
-	}
-
-	return ds[actualIndex]
-}
-
-// SMA represents a Simple Moving Average indicator
+// SMA represents a Simple Moving Average indicator using a circular ring buffer
 type SMA struct {
 	period     int
-	prices     []float64 // Rolling window of input prices
 	updateMode UpdateMode
-	Value      DataSeries // Historical SMA values with LIFO indexing
+
+	// Circular buffer for input prices
+	prices     []float64
+	priceIdx   int
+	priceCount int
+	runningSum float64
+
+	// Store last calculated value directly (avoids ring buffer retrieval issues)
+	lastValue float64
+
+	// Circular buffer for calculated SMA results (Size = Period * 2 for lookback)
+	values     []float64
+	valueIdx   int
+	valueCount int
+
+	// Value provides LIFO-like access for strategy logic
+	Value DataSeriesHelper
 }
 
-// NewSMA creates a new SMA indicator with the specified period and update mode
+// DataSeriesHelper provides a way to access the circular buffer using LIFO indexing
+type DataSeriesHelper struct {
+	sma *SMA
+}
+
+// Get returns historical SMA values: [0] = current, [1] = 1 back, etc.
+func (h DataSeriesHelper) Get(index int) float64 {
+	if h.sma == nil || index < 0 || index >= h.sma.valueCount {
+		return 0
+	}
+
+	// Special case: index 0 returns the last calculated value directly
+	if index == 0 {
+		return h.sma.lastValue
+	}
+
+	// Calculate circular index: (currentIdx - index + totalSize) % totalSize
+	size := len(h.sma.values)
+	// Subtract 1 from valueIdx because valueIdx points to the NEXT insert position
+	targetIdx := (h.sma.valueIdx - 1 - index + size) % size
+	return h.sma.values[targetIdx]
+}
+
+// NewSMA creates a new SMA indicator with circular buffers
 func NewSMA(period int, mode UpdateMode) *SMA {
-	return &SMA{
+	s := &SMA{
 		period:     period,
-		prices:     make([]float64, 0, period),
 		updateMode: mode,
-		Value:      make(DataSeries, 0),
+		prices:     make([]float64, period),
+		values:     make([]float64, period*2), // 2x period for safe lookback
 	}
+	s.Value = DataSeriesHelper{sma: s}
+	return s
 }
 
-// Update adds a new bar's closing price and calculates the SMA
+// Update adds a new price and returns the current SMA in O(1) time
 func (s *SMA) Update(price float64) float64 {
-	s.prices = append(s.prices, price)
-
-	// Keep only the last 'period' prices
-	if len(s.prices) > s.period {
-		s.prices = s.prices[1:]
+	// 1. Update running sum (subtract oldest, add newest)
+	if s.priceCount == s.period {
+		s.runningSum -= s.prices[s.priceIdx]
+	} else {
+		s.priceCount++
 	}
 
-	smaValue := s.calculate()
+	s.prices[s.priceIdx] = price
+	s.runningSum += price
 
-	// Store the calculated SMA value
-	s.Value = append(s.Value, smaValue)
+	// Move price index forward
+	s.priceIdx = (s.priceIdx + 1) % s.period
+
+	// 2. Calculate SMA
+	var smaValue float64
+	if s.priceCount == s.period {
+		smaValue = s.runningSum / float64(s.period)
+	}
+
+	// 3. Store the value
+	s.lastValue = smaValue          // Store directly for fast access
+	s.values[s.valueIdx] = smaValue // Also store in ring buffer for history
+	s.valueIdx = (s.valueIdx + 1) % len(s.values)
+	if s.valueCount < len(s.values) {
+		s.valueCount++
+	}
 
 	return smaValue
 }
 
-// calculate computes the current SMA
-func (s *SMA) calculate() float64 {
-	if len(s.prices) < s.period {
-		return 0 // Not enough data yet
-	}
-
-	sum := 0.0
-	for _, price := range s.prices {
-		sum += price
-	}
-
-	return sum / float64(s.period)
-}
-
-// CurrentValue returns the most recent SMA value (same as Value[0])
+// CurrentValue returns the most recent SMA value
 func (s *SMA) CurrentValue() float64 {
-	return s.Value.Get(0)
+	return s.lastValue
 }
 
-// Reset clears all values
+// Reset clears the buffers
 func (s *SMA) Reset() {
-	s.prices = s.prices[:0]
-	s.Value = s.Value[:0]
+	s.priceIdx = 0
+	s.priceCount = 0
+	s.runningSum = 0
+	s.valueIdx = 0
+	s.valueCount = 0
+	s.lastValue = 0
 }
-
-// package indicators
-
-// // SMA represents a Simple Moving Average indicator
-// type SMA struct {
-// 	period int
-// 	values []float64
-// }
-
-// // NewSMA creates a new SMA indicator with the specified period
-// func NewSMA(period int) *SMA {
-// 	return &SMA{
-// 		period: period,
-// 		values: make([]float64, 0, period),
-// 	}
-// }
-
-// // Update adds a new value and returns the current SMA
-// // Returns 0 if there aren't enough values yet
-// func (s *SMA) Update(value float64) float64 {
-// 	s.values = append(s.values, value)
-
-// 	// Keep only the last 'period' values
-// 	if len(s.values) > s.period {
-// 		s.values = s.values[1:]
-// 	}
-
-// 	// Calculate SMA
-// 	if len(s.values) < s.period {
-// 		return 0 // Not enough data yet
-// 	}
-
-// 	sum := 0.0
-// 	for _, v := range s.values {
-// 		sum += v
-// 	}
-
-// 	return sum / float64(s.period)
-// }
-
-// // Value returns the current SMA without updating
-// func (s *SMA) Value() float64 {
-// 	if len(s.values) < s.period {
-// 		return 0
-// 	}
-
-// 	sum := 0.0
-// 	for _, v := range s.values {
-// 		sum += v
-// 	}
-
-// 	return sum / float64(s.period)
-// }
-
-// // Reset clears all values
-// func (s *SMA) Reset() {
-// 	s.values = s.values[:0]
-// }
