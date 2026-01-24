@@ -1,5 +1,6 @@
 package UI
 
+/*
 import (
 	"fmt"
 	"os"
@@ -2369,3 +2370,5 @@ func (m model) connectCmd() tea.Cmd {
 		}
 	}
 }
+
+//*/

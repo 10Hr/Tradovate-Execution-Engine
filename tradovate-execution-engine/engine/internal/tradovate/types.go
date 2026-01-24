@@ -9,20 +9,42 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// DataSubscriber manages real-time market data subscriptions
+// SubscriptionInfo tracks details about an active subscription
+type SubscriptionInfo struct {
+	Endpoint string                 // e.g., "md/subscribequote", "md/subscribechart"
+	Params   map[string]interface{} // The body/params that uniquely identify this subscription
+	ChartID  int                    // For chart subscriptions (returned by server)
+	RefCount int                    // Reference counting for shared subscriptions
+}
+
 type DataSubscriber struct {
 	client        marketdata.WebSocketSender
-	subscriptions map[string]string
-	mu            sync.RWMutex
 	log           *logger.Logger
+	mu            sync.RWMutex
+	subscriptions map[string]*SubscriptionInfo // key: hash of endpoint+params
 
-	// Custom handlers
-	OnQuoteUpdate    []func(quote marketdata.Quote)
-	OnChartUpdate    []func(chart marketdata.ChartUpdate)
-	OnOrderUpdate    func(data json.RawMessage)
-	OnPositionUpdate func(data json.RawMessage)
-	OnUserSync       func(data json.RawMessage)
+	// Callbacks
+	OnQuoteUpdate    []func(marketdata.Quote)
+	OnChartUpdate    []func(marketdata.ChartUpdate)
+	OnOrderUpdate    func(json.RawMessage)
+	OnPositionUpdate func(json.RawMessage)
+	OnUserSync       func(json.RawMessage)
 }
+
+// // DataSubscriber manages real-time market data subscriptions
+// type DataSubscriber struct {
+// 	client        marketdata.WebSocketSender
+// 	subscriptions map[string]string
+// 	mu            sync.RWMutex
+// 	log           *logger.Logger
+
+// 	// Custom handlers
+// 	OnQuoteUpdate    []func(quote marketdata.Quote)
+// 	OnChartUpdate    []func(chart marketdata.ChartUpdate)
+// 	OnOrderUpdate    func(data json.RawMessage)
+// 	OnPositionUpdate func(data json.RawMessage)
+// 	OnUserSync       func(data json.RawMessage)
+// }
 
 // MessageHandler is a callback for processing incoming WebSocket messages
 type MessageHandler func(eventType string, data json.RawMessage)

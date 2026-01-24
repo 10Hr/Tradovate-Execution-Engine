@@ -87,13 +87,12 @@ func (t *PLTracker) PrintSummary() {
 
 // PortfolioTracker manages the entire portfolio tracking system
 type PortfolioTracker struct {
-	authClient *tradovate.TradovateWebSocketClient
-	mdClient   *tradovate.TradovateWebSocketClient
-	subscriber *tradovate.DataSubscriber
-	plTracker  *PLTracker
-	log        *logger.Logger
-	running    bool
-	mu         sync.Mutex
+	tradingSubsciptionManager *tradovate.DataSubscriber
+	mdSubsciptionManager      *tradovate.DataSubscriber
+	plTracker                 *PLTracker
+	log                       *logger.Logger
+	running                   bool
+	mu                        sync.Mutex
 
 	// State tracking
 	userID    int
@@ -102,17 +101,33 @@ type PortfolioTracker struct {
 	products  map[string]float64
 }
 
+// type PortfolioTracker struct {
+// 	authClient *tradovate.TradovateWebSocketClient
+// 	mdClient   *tradovate.TradovateWebSocketClient
+// 	subscriber *tradovate.DataSubscriber
+// 	plTracker  *PLTracker
+// 	log        *logger.Logger
+// 	running    bool
+// 	mu         sync.Mutex
+
+// 	// State tracking
+// 	userID    int
+// 	positions map[int]*Position
+// 	contracts map[int]string
+// 	products  map[string]float64
+// }
+
 // NewPortfolioTracker creates a new portfolio tracker using existing clients
-func NewPortfolioTracker(authClient, mdClient *tradovate.TradovateWebSocketClient, userID int, log *logger.Logger) *PortfolioTracker {
+func NewPortfolioTracker(authClient, mdClient *tradovate.DataSubscriber, userID int, log *logger.Logger) *PortfolioTracker {
 	return &PortfolioTracker{
-		authClient: authClient,
-		mdClient:   mdClient,
-		plTracker:  NewPLTracker(log),
-		log:        log,
-		positions:  make(map[int]*Position),
-		contracts:  make(map[int]string),
-		products:   make(map[string]float64),
-		userID:     userID,
+		tradingSubsciptionManager: authClient,
+		mdSubsciptionManager:      mdClient,
+		plTracker:                 NewPLTracker(log),
+		log:                       log,
+		positions:                 make(map[int]*Position),
+		contracts:                 make(map[int]string),
+		products:                  make(map[string]float64),
+		userID:                    userID,
 	}
 }
 
@@ -126,55 +141,80 @@ func (pt *PortfolioTracker) Start(environment string) error {
 	pt.running = true
 	pt.mu.Unlock()
 
-	// Ensure clients are connected
-	if pt.authClient == nil || pt.mdClient == nil {
-		return fmt.Errorf("Websocket clients not initialized")
+	// Verify subscribers are initialized
+	if pt.tradingSubsciptionManager == nil || pt.mdSubsciptionManager == nil {
+		return fmt.Errorf("Subscription managers not initialized")
 	}
 
-	if !pt.authClient.IsAuthorized() {
-		if err := pt.authClient.Connect(); err != nil {
-			return fmt.Errorf("failed to connect auth websocket: %w", err)
-		}
-	}
-
-	if !pt.mdClient.IsAuthorized() {
-		if err := pt.mdClient.Connect(); err != nil {
-			return fmt.Errorf("failed to connect MD websocket: %w", err)
-		}
-	}
-
-	// Create subscriber for auth client (user sync)
-	authSubscriber := tradovate.NewDataSubscriber(pt.authClient)
-	authSubscriber.SetLogger(pt.log)
-
-	// Set up user sync handler
-	authSubscriber.OnUserSync = func(data json.RawMessage) {
+	// Set up handlers on existing subscribers
+	pt.tradingSubsciptionManager.OnUserSync = func(data json.RawMessage) {
 		pt.handleUserSync(data)
 	}
 
-	// Set up real-time position update handler
-	authSubscriber.OnPositionUpdate = func(data json.RawMessage) {
+	pt.tradingSubsciptionManager.OnPositionUpdate = func(data json.RawMessage) {
 		pt.handlePositionUpdate(data)
 	}
-
-	// Handle user sync events
-	pt.authClient.SetMessageHandler(authSubscriber.HandleEvent)
-
-	// Create subscriber for market data
-	pt.subscriber = tradovate.NewDataSubscriber(pt.mdClient)
-	pt.subscriber.SetLogger(pt.log)
-
-	// Handle market data events
-	pt.mdClient.SetMessageHandler(pt.subscriber.HandleEvent)
+	pt.mdSubsciptionManager.AddQuoteHandler(pt.handleQuoteUpdate)
 
 	// Subscribe to user sync
-	if err := authSubscriber.SubscribeUserSyncRequests([]int{pt.userID}); err != nil {
+	if err := pt.tradingSubsciptionManager.SubscribeUserSyncRequests([]int{pt.userID}); err != nil {
 		return fmt.Errorf("failed to subscribe to user sync: %w", err)
 	}
 
 	pt.log.Info("Portfolio tracker started - subscribed to user sync")
-
 	return nil
+	/*
+			// Ensure clients are connected
+			if pt.authClient == nil || pt.mdClient == nil {
+				return fmt.Errorf("Websocket clients not initialized")
+			}
+
+			if !pt.authClient.IsAuthorized() {
+				if err := pt.authClient.Connect(); err != nil {
+					return fmt.Errorf("failed to connect auth websocket: %w", err)
+				}
+			}
+
+			if !pt.mdClient.IsAuthorized() {
+				if err := pt.mdClient.Connect(); err != nil {
+					return fmt.Errorf("failed to connect MD websocket: %w", err)
+				}
+			}
+
+			// Create subscriber for auth client (user sync)
+			authSubscriber := tradovate.NewDataSubscriber(pt.authClient)
+			authSubscriber.SetLogger(pt.log)
+
+			// Set up user sync handler
+			authSubscriber.OnUserSync = func(data json.RawMessage) {
+				pt.handleUserSync(data)
+			}
+
+			// Set up real-time position update handler
+			authSubscriber.OnPositionUpdate = func(data json.RawMessage) {
+				pt.handlePositionUpdate(data)
+			}
+
+			// Handle user sync events
+			pt.authClient.SetMessageHandler(authSubscriber.HandleEvent)
+
+			// Create subscriber for market data
+			pt.subscriber = tradovate.NewDataSubscriber(pt.mdClient)
+			pt.subscriber.SetLogger(pt.log)
+
+			// Handle market data events
+			pt.mdClient.SetMessageHandler(pt.subscriber.HandleEvent)
+
+			// Subscribe to user sync
+			if err := authSubscriber.SubscribeUserSyncRequests([]int{pt.userID}); err != nil {
+				return fmt.Errorf("failed to subscribe to user sync: %w", err)
+			}
+
+			pt.log.Info("Portfolio tracker started - subscribed to user sync")
+
+
+		return nil
+		//*/
 }
 
 // handlePositionUpdate processes real-time position updates
@@ -191,25 +231,39 @@ func (pt *PortfolioTracker) handlePositionUpdate(data json.RawMessage) {
 	pt.mu.Unlock()
 
 	if hasContract {
+		// NEW
 		if pos.NetPos != 0 {
-			// Only subscribe if not already subscribed to prevent redundant requests
-			pt.mu.Lock()
-			if pt.subscriber != nil {
-				subs := pt.subscriber.GetActiveSubscriptions()
-				key := fmt.Sprintf("quote:%s", contractName)
-				if _, alreadySubbed := subs[key]; !alreadySubbed {
-					pt.log.Infof("Position update for %s: NetPos=%d, NetPrice=%.2f -> Subscribing",
-						contractName, pos.NetPos, pos.NetPrice)
-					pt.subscriber.SubscribeQuote(contractName)
-				}
+			pt.log.Infof("Position update for %s: NetPos=%d, NetPrice=%.2f -> Subscribing",
+				contractName, pos.NetPos, pos.NetPrice)
+
+			if err := pt.mdSubsciptionManager.SubscribeQuote(contractName); err != nil {
+				pt.log.Warnf("Failed to subscribe to quotes for %s: %v", contractName, err)
 			}
-			pt.mu.Unlock()
+
+			// if pos.NetPos != 0 {
+			// 	// Only subscribe if not already subscribed to prevent redundant requests
+			// 	pt.mu.Lock()
+			// 	if pt.subscriber != nil {
+			// 		subs := pt.subscriber.GetActiveSubscriptions()
+			// 		key := fmt.Sprintf("quote:%s", contractName)
+			// 		if _, alreadySubbed := subs[key]; !alreadySubbed {
+			// 			pt.log.Infof("Position update for %s: NetPos=%d, NetPrice=%.2f -> Subscribing",
+			// 				contractName, pos.NetPos, pos.NetPrice)
+			// 			pt.subscriber.SubscribeQuote(contractName)
+			// 		}
+			// 	}
+			// 	pt.mu.Unlock()
 		} else {
 			pt.log.Infof("Position for %s is now FLAT -> Unsubscribing", contractName)
-			pt.subscriber.UnsubscribeQuote(contractName)
+			pt.mdSubsciptionManager.UnsubscribeQuote(contractName)
 			// Reset P&L in tracker for this symbol
 			pt.plTracker.Update(contractName, 0, 0, 0, 0)
 		}
+		// 	pt.log.Infof("Position for %s is now FLAT -> Unsubscribing", contractName)
+		// 	pt.subscriber.UnsubscribeQuote(contractName)
+		// 	// Reset P&L in tracker for this symbol
+		// 	pt.plTracker.Update(contractName, 0, 0, 0, 0)
+		// }
 	}
 }
 
@@ -239,7 +293,7 @@ func (pt *PortfolioTracker) handleUserSync(data json.RawMessage) {
 	}
 
 	// Set up the unified quote handler once
-	pt.subscriber.OnQuoteUpdate = append(pt.subscriber.OnQuoteUpdate, pt.handleQuoteUpdate)
+	//pt.subscriber.OnQuoteUpdate = append(pt.subscriber.OnQuoteUpdate, pt.handleQuoteUpdate)
 	pt.mu.Unlock()
 
 	// Process each position
@@ -263,7 +317,7 @@ func (pt *PortfolioTracker) handleUserSync(data json.RawMessage) {
 				pt.log.Infof("Found active position: %s (ID: %d) - NetPos: %d -> Subscribing",
 					contractName, pos.ContractID, pos.NetPos)
 				// Subscribe to market data
-				pt.subscriber.SubscribeQuote(contractName)
+				pt.mdSubsciptionManager.SubscribeQuote(contractName)
 			} else {
 				pt.log.Debugf("Position for %s (ID: %d) is flat, skipping subscription",
 					contractName, pos.ContractID)
@@ -338,30 +392,49 @@ func (pt *PortfolioTracker) Stop() error {
 
 	pt.log.Info("Stopping portfolio tracker...")
 
-	// 1. Unsubscribe from all market data FIRST
-	if pt.subscriber != nil {
-		if err := pt.subscriber.UnsubscribeAll(); err != nil {
+	// Only unsubscribe (main handles disconnection)
+	if pt.mdSubsciptionManager != nil {
+		if err := pt.mdSubsciptionManager.UnsubscribeAll(); err != nil {
 			pt.log.Warnf("Error unsubscribing: %v", err)
-		}
-	}
-
-	// 2. Disconnect WebSocket clients AFTER unsubscribing
-	if pt.authClient != nil {
-		if err := pt.authClient.Disconnect(); err != nil {
-			pt.log.Warnf("Error disconnecting auth client: %v", err)
-		}
-	}
-
-	if pt.mdClient != nil {
-		if err := pt.mdClient.Disconnect(); err != nil {
-			pt.log.Warnf("Error disconnecting MD client: %v", err)
 		}
 	}
 
 	pt.running = false
 	pt.log.Info("Portfolio tracker stopped")
-
 	return nil
+	// pt.mu.Lock()
+	// defer pt.mu.Unlock()
+
+	// if !pt.running {
+	// 	return nil
+	// }
+
+	// pt.log.Info("Stopping portfolio tracker...")
+
+	// // 1. Unsubscribe from all market data FIRST
+	// if pt.subscriber != nil {
+	// 	if err := pt.subscriber.UnsubscribeAll(); err != nil {
+	// 		pt.log.Warnf("Error unsubscribing: %v", err)
+	// 	}
+	// }
+
+	// // 2. Disconnect WebSocket clients AFTER unsubscribing
+	// if pt.authClient != nil {
+	// 	if err := pt.authClient.Disconnect(); err != nil {
+	// 		pt.log.Warnf("Error disconnecting auth client: %v", err)
+	// 	}
+	// }
+
+	// if pt.mdClient != nil {
+	// 	if err := pt.mdClient.Disconnect(); err != nil {
+	// 		pt.log.Warnf("Error disconnecting MD client: %v", err)
+	// 	}
+	// }
+
+	// pt.running = false
+	// pt.log.Info("Portfolio tracker stopped")
+
+	// return nil
 }
 
 // GetPLSummary returns the current P&L summary
@@ -390,16 +463,25 @@ func (pt *PortfolioTracker) StartWithPeriodicSummary(environment string, interva
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
-		// Start periodic summary printing
-		go func() {
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
-
-			for range ticker.C {
-				pt.PrintSummary()
-			}
-		}()
+		for range ticker.C {
+			pt.PrintSummary()
+		}
 	}()
+	// // Start periodic summary printing
+	// go func() {
+	// 	ticker := time.NewTicker(interval)
+	// 	defer ticker.Stop()
+
+	// 	// Start periodic summary printing
+	// 	go func() {
+	// 		ticker := time.NewTicker(interval)
+	// 		defer ticker.Stop()
+
+	// 		for range ticker.C {
+	// 			pt.PrintSummary()
+	// 		}
+	// 	}()
+	// }()
 
 	return nil
 }
