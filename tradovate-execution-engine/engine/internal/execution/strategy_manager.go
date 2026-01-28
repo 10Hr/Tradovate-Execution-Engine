@@ -3,6 +3,7 @@ package execution
 import (
 	"fmt"
 	"sync"
+	"tradovate-execution-engine/engine/internal/logger"
 )
 
 // StrategyParam represents a single configuration parameter for a strategy
@@ -28,15 +29,15 @@ type Strategy interface {
 // StrategyRegistry maintains a list of avaialble strategies
 type StrategyRegistry struct {
 	mu         sync.RWMutex
-	strategies map[string]func() Strategy
+	strategies map[string]func(*logger.Logger) Strategy
 }
 
 var globalRegistry = &StrategyRegistry{
-	strategies: make(map[string]func() Strategy),
+	strategies: make(map[string]func(*logger.Logger) Strategy),
 }
 
 // Register adds a strategy to the global registry
-func Register(name string, factory func() Strategy) {
+func Register(name string, factory func(*logger.Logger) Strategy) {
 	globalRegistry.mu.Lock()
 	defer globalRegistry.mu.Unlock()
 	globalRegistry.strategies[name] = factory
@@ -55,7 +56,7 @@ func GetAvailableStrategies() []string {
 }
 
 // CreateStrategy instantiates a strategy by name
-func CreateStrategy(name string) (Strategy, error) {
+func CreateStrategy(name string, logger *logger.Logger) (Strategy, error) {
 	globalRegistry.mu.RLock()
 	factory, exists := globalRegistry.strategies[name]
 	globalRegistry.mu.RUnlock()
@@ -63,5 +64,5 @@ func CreateStrategy(name string) (Strategy, error) {
 	if !exists {
 		return nil, fmt.Errorf("strategy not found: %s", name)
 	}
-	return factory(), nil
+	return factory(logger), nil
 }

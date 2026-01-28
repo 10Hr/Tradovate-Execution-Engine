@@ -13,56 +13,38 @@ import (
 	"tradovate-execution-engine/engine/internal/logger"
 )
 
-// AuthResponse represents the Tradovate authentication response
-type AuthResponse struct {
-	AccessToken    string    `json:"accessToken"`
-	ExpirationTime time.Time `json:"expirationTime"`
-	MDAccessToken  string    `json:"mdAccessToken"`
-	UserID         int       `json:"userId"`
-	Name           string    `json:"name"`
-	OrgName        string    `json:"orgName"`
-	UserStatus     string    `json:"userStatus"`
-	HasMarketData  bool      `json:"hasMarketData"`
-	HasFunded      bool      `json:"hasFunded"`
-	HasLive        bool      `json:"hasLive"`
-}
-
-// Account represents a Tradovate account
-type Account struct {
-	ID          int    `json:"id"`
-	Name        string `json:"name"`
-	AccountType string `json:"accountType"`
-	Active      bool   `json:"active"`
-}
-
-// TokenManager manages authentication tokens for Tradovate API
-type TokenManager struct {
-	mu             sync.RWMutex
-	accessToken    string
-	mdAccessToken  string
-	expirationTime time.Time
-	userID         int
-	accountID      int
-	username       string
-	credentials    map[string]interface{}
-	baseURL        string
-	log            *logger.Logger
-}
-
 var (
 	// Global token manager instance
 	globalTokenManager *TokenManager
 	once               sync.Once
 )
 
-// GetTokenManager returns the singleton token manager instance
-func GetTokenManager() *TokenManager {
+// NewTokenManager returns the singleton token manager instance
+func NewTokenManager(config *config.Config) *TokenManager {
 	once.Do(func() {
-		globalTokenManager = &TokenManager{
-			baseURL: "https://live.tradovateapi.com",
-		}
+		globalTokenManager = &TokenManager{}
 	})
+
+	globalTokenManager.SetCredentials(
+		config.Tradovate.AppID,
+		config.Tradovate.AppVersion,
+		config.Tradovate.Chl,
+		config.Tradovate.Cid,
+		config.Tradovate.DeviceID,
+		config.Tradovate.Environment,
+		config.Tradovate.Username,
+		config.Tradovate.Password,
+		config.Tradovate.Sec,
+		config.Tradovate.Enc,
+	)
+
 	return globalTokenManager
+}
+
+// ResetTokenManagerForTest resets the singleton for testing purposes
+func ResetTokenManagerForTest() {
+	globalTokenManager = nil
+	once = sync.Once{}
 }
 
 // SetLogger sets the logger for the TokenManager
@@ -90,7 +72,6 @@ func (tm *TokenManager) SetCredentials(appID, appVersion, chl, cid, deviceID, en
 		"sec":         sec,
 	}
 
-	// Set base URL based on environment
 	tm.baseURL = config.GetHTTPBaseURL(environment)
 }
 
@@ -131,12 +112,15 @@ func (tm *TokenManager) Authenticate() error {
 	// Read response
 	respBody, err := io.ReadAll(resp.Body)
 
+	tm.log.Info("RAW RESPONSE:", string(respBody))
 	if err != nil {
 		return fmt.Errorf("Error reading response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Authentication failed with status %d: %s", resp.StatusCode, string(respBody))
+
+		return parseAuthError(resp.StatusCode, respBody)
+		//return fmt.Errorf("Authentication failed with status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	// Parse response
@@ -154,17 +138,47 @@ func (tm *TokenManager) Authenticate() error {
 	tm.username = authResp.Name
 	tm.mu.Unlock()
 
-	// Log success if logger is set
-	tm.mu.RLock()
-	if tm.log != nil {
-		tm.log.Info("Authentication successful!")
-		tm.log.Infof("User: %s (ID: %d)", authResp.Name, authResp.UserID)
-		tm.log.Infof("Org: %s", authResp.OrgName)
-		tm.log.Infof("Token expires: %s", authResp.ExpirationTime.Format("January 2, 2006 at 3:04 PM EST"))
-	}
-	tm.mu.RUnlock()
+	// At the end of Authenticate()
+	// tm.mu.RLock()
+	// accessToken := tm.accessToken
+	// tm.mu.RUnlock()
+
+	// if accessToken == "" {
+	// 	return fmt.Errorf("Config not configured properly, please ensure all fields are correct%w", tm)
+	// }
 
 	return nil
+}
+
+// ✅ ADD THIS: Parse HTTP errors from Tradovate
+func parseAuthError(statusCode int, body []byte) error {
+	switch statusCode {
+	case 400:
+		return fmt.Errorf("invalid credentials format (check username/password)")
+	case 401:
+		return fmt.Errorf("authentication failed - incorrect username or password")
+	case 403:
+		return fmt.Errorf("access denied - check App ID, CID, and SEC")
+	case 429:
+		return fmt.Errorf("too many login attempts - please wait and try again")
+	case 500, 502, 503:
+		return fmt.Errorf("Tradovate API error - please try again later")
+	default:
+		// Try to parse error message from response
+		var apiErr struct {
+			ErrorText string `json:"errorText"`
+			Message   string `json:"message"`
+		}
+		if err := json.Unmarshal(body, &apiErr); err == nil {
+			if apiErr.ErrorText != "" {
+				return fmt.Errorf("authentication failed: %s", apiErr.ErrorText)
+			}
+			if apiErr.Message != "" {
+				return fmt.Errorf("authentication failed: %s", apiErr.Message)
+			}
+		}
+		return fmt.Errorf("authentication failed with status %d: %s", statusCode, string(body))
+	}
 }
 
 // GetAccessToken returns the current access token
@@ -298,4 +312,157 @@ func (tm *TokenManager) MakeAuthenticatedRequest(method, endpoint string, body i
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	return client.Do(req)
+}
+
+// RenewAccessToken renews the current access token without creating a new session
+// This should be used instead of Authenticate() for long-running applications
+func (tm *TokenManager) RenewAccessToken() error {
+	tm.mu.RLock()
+	currentToken := tm.accessToken
+	baseURL := tm.baseURL
+	tm.mu.RUnlock()
+
+	if currentToken == "" {
+		return fmt.Errorf("No current token available. Call Authenticate first")
+	}
+
+	// Create the request
+	req, err := http.NewRequest("GET", baseURL+"/v1/auth/renewaccesstoken", nil)
+	if err != nil {
+		return fmt.Errorf("error creating renewal request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+currentToken)
+
+	// Make the request
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("Error making renewal request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read response
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("Error reading renewal response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("Token renewal failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	// Parse response (same structure as auth response)
+	var renewResp AuthResponse
+	if err := json.Unmarshal(respBody, &renewResp); err != nil {
+		return fmt.Errorf("Error parsing renewal response: %w", err)
+	}
+
+	// Update tokens in memory (WebSockets stay connected!)
+	tm.mu.Lock()
+	tm.accessToken = renewResp.AccessToken
+	// Note: renewAccessToken doesn't return mdAccessToken, only updates the main token
+	// The MD token from original auth continues to work
+	tm.expirationTime = renewResp.ExpirationTime
+	tm.mu.Unlock()
+
+	// Log success
+	tm.mu.RLock()
+	if tm.log != nil {
+		tm.log.Info("✅ Token renewed successfully (session maintained)")
+		tm.log.Infof("New expiration: %s", renewResp.ExpirationTime.Format("January 2, 2006 at 3:04 PM EST"))
+		//tm.log.Info("✅ Token renewed successfully (session maintained)")
+		//tm.log.Infof("New expiration: %s", renewResp.ExpirationTime.Format("January 2, 2006 at 3:04 PM EST"))
+	}
+	tm.mu.RUnlock()
+
+	return nil
+}
+
+// StartTokenRefreshMonitor starts a background goroutine that refreshes tokens before expiration
+func (tm *TokenManager) StartTokenRefreshMonitor(refreshCallback func()) {
+	tm.mu.Lock()
+	if tm.monitorStopChan != nil {
+		close(tm.monitorStopChan)
+	}
+	tm.monitorStopChan = make(chan struct{})
+	stopChan := tm.monitorStopChan
+	tm.mu.Unlock()
+
+	go func() {
+		for {
+			// Calculate time until token expires
+			tm.mu.RLock()
+			timeUntilExpiry := time.Until(tm.expirationTime)
+			tm.mu.RUnlock()
+
+			// Refresh 5 minutes before expiration (safer than 10 min before)
+			refreshTime := timeUntilExpiry - (5 * time.Minute)
+
+			// If already expired or expiring soon, refresh immediately
+			if refreshTime <= 0 {
+				refreshTime = 1 * time.Second
+			}
+
+			if tm.log != nil {
+				// tm.log.Infof("Token refresh scheduled in %v (expires at %v)",
+				// 	refreshTime, tm.expirationTime.Format("3:04 PM"))
+			}
+			tm.log.Infof("Token refresh scheduled in %v (expires at %v)",
+				refreshTime, tm.expirationTime.Format("3:04 PM"))
+
+			// Wait until refresh time or stop signal
+			select {
+			case <-stopChan:
+				tm.log.Info("Token refresh monitor stopped")
+				return
+			case <-time.After(refreshTime):
+				// Continue to refresh
+			}
+
+			if tm.log != nil {
+				tm.log.Info("🔄 Refreshing access tokens...")
+			}
+
+			//Renew access token without
+			if err := tm.RenewAccessToken(); err != nil {
+				tm.log.Errorf("Failed to renew access token: %v", err)
+			} else {
+				if tm.log != nil {
+					tm.log.Info("✅ Tokens refreshed successfully")
+				}
+
+				// Call the callback to notify that tokens have been refreshed
+				if refreshCallback != nil {
+					refreshCallback()
+				}
+			}
+		}
+	}()
+}
+
+// StopTokenRefreshMonitor stops the background refresh goroutine
+func (tm *TokenManager) StopTokenRefreshMonitor() {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.monitorStopChan != nil {
+		close(tm.monitorStopChan)
+		tm.monitorStopChan = nil
+	}
+}
+
+// GetTimeUntilExpiration returns how long until the token expires
+func (tm *TokenManager) GetTimeUntilExpiration() time.Duration {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return time.Until(tm.expirationTime)
+}
+
+// WillExpireSoon returns true if token expires in less than the given duration
+func (tm *TokenManager) WillExpireSoon(threshold time.Duration) bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return time.Until(tm.expirationTime) < threshold
 }

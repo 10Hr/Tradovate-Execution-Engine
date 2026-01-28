@@ -1,12 +1,15 @@
 package UI
 
-/*
+///*
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 	"tradovate-execution-engine/engine/config"
 	"tradovate-execution-engine/engine/internal/auth"
@@ -72,11 +75,9 @@ type Tab int
 
 const (
 	TabMain Tab = iota
+	TabStrategy
 	TabOrderManagement
 	TabPositions
-	TabOrders
-	TabExecutions
-	TabStrategy
 	TabCommands
 	configFile = "config.json"
 )
@@ -134,13 +135,13 @@ type PnLDataPoint struct {
 }
 
 type StrategyState struct {
-	Name              string
-	Active            bool
-	Params            []execution.StrategyParam
-	Instance          execution.Strategy
-	Symbol            string
-	Description       string
-	ReceivedFirstData bool
+	Name        string
+	Params      []execution.StrategyParam
+	Instance    execution.Strategy
+	Symbol      string
+	Description string
+
+	Runtime *StrategyRuntime
 }
 
 type model struct {
@@ -152,7 +153,6 @@ type model struct {
 	historyIndex         int
 	searchInput          string
 	statusMsg            string
-	errorMsg             string
 	width                int
 	height               int
 	searchActive         bool
@@ -174,15 +174,15 @@ type model struct {
 	// Data
 	positions  []Position
 	orders     []Order
-	executions []Execution
 	commands   []Command
 	pnlHistory []PnLDataPoint
 
 	// Connection status
-	connected     bool
-	totalPnL      float64
-	unrealizedPnL float64
-	realizedPnL   float64
+	connected        bool
+	totalPnL         float64
+	unrealizedPnL    float64
+	realizedPnL      float64
+	dailyrealizedPnL float64
 
 	// Config
 	configPath    string
@@ -195,36 +195,31 @@ type model struct {
 	currentStrategy     *StrategyState
 	strategyParams      map[string]string
 
-	// Order Manager
-	orderManager     *execution.OrderManager
-	positionManager  *portfolio.PositionManager
-	portfolioTracker *portfolio.PortfolioTracker
+	// Managers
+	tm *auth.TokenManager
+	om *execution.OrderManager
+	pm *portfolio.PositionManager
+	pt *portfolio.PortfolioTracker
 
 	// Market Data & Auth
-	wsClient          *tradovate.TradovateWebSocketClient
-	userSync          *tradovate.TradovateWebSocketClient
-	mdSubscriber      *tradovate.DataSubscriber
-	tradingSubscriber *tradovate.DataSubscriber
+	marketDataClient                 *tradovate.TradovateWebSocketClient
+	tradingClient                    *tradovate.TradovateWebSocketClient
+	marketDataSubscriptionManager    *tradovate.DataSubscriber
+	tradingClientSubscriptionManager *tradovate.DataSubscriber
+
+	config *config.Config
 }
 
-func InitialModel(mainLog, orderLog *logger.Logger, om *execution.OrderManager) model {
-	// Use provided loggers or create defaults
-	if mainLog == nil {
-		mainLog = logger.NewLogger(500)
-	}
-	if orderLog == nil {
-		orderLog = logger.NewLogger(500)
-	}
+func InitialModel() model {
+	// Create Loggers
+
+	mainLog := logger.NewLogger(500)
+	orderLog := logger.NewLogger(500)
 	strategyLog := logger.NewLogger(500)
 
 	// Initial log messages
 	mainLog.Println("System initialized")
 	mainLog.Printf("Starting trading engine v1.0.0")
-
-	// Configure singleton TokenManager with logger
-	auth.GetTokenManager().SetLogger(mainLog)
-
-	symbol := "MESH6"
 
 	// Initialize Editor
 	ta := textarea.New()
@@ -234,30 +229,18 @@ func InitialModel(mainLog, orderLog *logger.Logger, om *execution.OrderManager) 
 	availableStrats := execution.GetAvailableStrategies()
 	mainLog.Infof("Discovered %d registered strategies: %v", len(availableStrats), availableStrats)
 
-	// Also check physical folder for visibility
-	stratDir := filepath.Join(config.GetProjectRoot(), "engine", "strategies")
-	files, err := os.ReadDir(stratDir)
-	if err == nil {
-		for _, file := range files {
-			if !file.IsDir() && strings.HasSuffix(file.Name(), ".go") {
-				mainLog.Infof("Found strategy file on disk: %s", file.Name())
-			}
-		}
-	}
-
 	return model{
-		activeTab:            TabMain,
-		mode:                 modeNormal,
-		tradingMode:          ModeVisual,
-		connected:            false,
-		totalPnL:             0,
-		mainLogger:           mainLog,
-		orderLogger:          orderLog,
-		strategyLogger:       strategyLog,
-		orderManager:         om,
+		activeTab:      TabMain,
+		mode:           modeNormal,
+		tradingMode:    ModeVisual,
+		connected:      false,
+		totalPnL:       0,
+		mainLogger:     mainLog,
+		orderLogger:    orderLog,
+		strategyLogger: strategyLog,
+
 		configPath:           config.GetConfigPath(),
 		strategyName:         "No strategy selected",
-		currentSymbol:        symbol,
 		logScrollOffset:      1000000,
 		orderLogScrollOffset: 1000000,
 		stratLogScrollOffset: 1000000,
@@ -270,7 +253,6 @@ func InitialModel(mainLog, orderLog *logger.Logger, om *execution.OrderManager) 
 		// Empty data - will be populated from OrderManager
 		positions:  []Position{},
 		orders:     []Order{},
-		executions: []Execution{},
 		pnlHistory: []PnLDataPoint{},
 		commands: []Command{
 			{Name: "buy", Description: "Place a buy order", Usage: ":buy <symbol> qty:<quantity>", Category: "Trading"},
@@ -299,12 +281,38 @@ func tickCmd() tea.Cmd {
 	})
 }
 
+type StrategyStatus int32
+
+type StrategyRuntime struct {
+	status atomic.Int32
+}
+
+const (
+	StrategyDisabled StrategyStatus = iota
+	StrategyStarting
+	StrategyRunning
+	StrategyStopping
+	StrategyStopped
+	StrategyError
+)
+
+func (r *StrategyRuntime) SetStatus(s StrategyStatus) {
+	r.status.Store(int32(s))
+}
+
+func (r *StrategyRuntime) Status() StrategyStatus {
+	return StrategyStatus(r.status.Load())
+}
+
 // connMsg indicates connection success/failure
 type connMsg struct {
 	err error
 }
 
 type connMsgSuccess struct {
+	config            *config.Config
+	tokenManager      *auth.TokenManager
+	orderManager      *execution.OrderManager
 	mdClient          *tradovate.TradovateWebSocketClient
 	mdSubscriber      *tradovate.DataSubscriber
 	tradingClient     *tradovate.TradovateWebSocketClient
@@ -341,9 +349,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		// Update data from OrderManager
-		if m.orderManager != nil {
+		if m.om != nil {
 			// Update Orders
-			execOrders := m.orderManager.GetAllOrders()
+			execOrders := m.om.GetAllOrders()
 			uiOrders := make([]Order, len(execOrders))
 			for i, o := range execOrders {
 				uiOrders[i] = Order{
@@ -359,8 +367,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.orders = uiOrders
 
 			// Update Positions
-			if m.positionManager != nil {
-				pmPositions := m.positionManager.GetAllPositions()
+			if m.pm != nil {
+				pmPositions := m.pm.GetAllPositions()
 				var uiPositions []Position
 				var unrealizedTotal float64
 
@@ -379,17 +387,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.unrealizedPnL = unrealizedTotal
 
 				// Get realized PnL from OrderManager
-				if m.orderManager != nil {
-					m.realizedPnL = m.orderManager.GetDailyPnL()
+				if m.om != nil {
+					m.realizedPnL = m.om.GetDailyPnL()
 				}
 
-				if m.portfolioTracker != nil {
-					m.totalPnL = m.portfolioTracker.GetTotalPL()
+				if m.pt != nil {
+					m.totalPnL = m.pt.GetTotalPL()
+					m.dailyrealizedPnL = m.pt.GetRealizedPnL()
 				} else {
 					m.totalPnL = m.realizedPnL + m.unrealizedPnL
 				}
-			} else if m.orderManager != nil {
-				execPos := m.orderManager.GetPosition(m.currentSymbol)
+			} else if m.om != nil {
+				execPos := m.om.GetPosition(m.currentSymbol)
 				if execPos.NetPos != 0 {
 					m.positions = []Position{{
 						Symbol:   execPos.Name,
@@ -402,9 +411,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 				// Update PnL
-				m.realizedPnL = m.orderManager.GetDailyPnL()
+				m.realizedPnL = m.om.GetDailyPnL()
 				m.unrealizedPnL = execPos.PL
 				m.totalPnL = m.realizedPnL + m.unrealizedPnL
+			}
+
+			// Use PortfolioTracker as the source of truth if available
+			if m.pt != nil {
+				summary := m.pt.GetPLSummary()
+				var uiPositions []Position
+				var unrealizedTotal float64
+
+				for _, entry := range summary {
+					if entry.NetPos != 0 {
+						uiPositions = append(uiPositions, Position{
+							Symbol:   entry.Name,
+							Quantity: entry.NetPos,
+							AvgPrice: entry.BuyPrice,
+							PnL:      entry.PL,
+						})
+					}
+					unrealizedTotal += entry.PL
+				}
+				m.positions = uiPositions
+				// m.unrealizedPnL = unrealizedTotal
+				m.unrealizedPnL = m.pt.GetTotalPL()
+
+				m.totalPnL = m.unrealizedPnL + m.dailyrealizedPnL
+				m.dailyrealizedPnL = m.pt.GetRealizedPnL()
+
+				// Check daily loss limit
+				if m.om != nil && m.om.GetRiskManager().IsDailyLossExceeded(m.totalPnL) {
+					if m.currentStrategy != nil && m.currentStrategy.Runtime.Status() == StrategyRunning {
+						m.mainLogger.Error("Daily loss limit exceeded! Flattening positions and stopping strategy.")
+						m.stopCurrentStrategy()
+						m.om.FlattenPositions()
+						m.statusMsg = errorStyle.Render("DAILY LOSS LIMIT REACHED - TRADING SUSPENDED")
+					}
+				}
 			}
 
 			// Update PnL History (simple version: append every tick if changed or every X seconds)
@@ -419,24 +463,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.pnlHistory = m.pnlHistory[1:]
 				}
 			}
-
-			// Executions - simplified derivation from filled orders for now
-			// Ideally OrderManager would expose a GetExecutions() or GetFills()
-			// For now, let's filter orders that are filled
-			var execs []Execution
-			for _, o := range execOrders {
-				if o.Status == models.StatusFilled {
-					execs = append(execs, Execution{
-						Time:     o.FilledAt,
-						Symbol:   o.Symbol,
-						Side:     string(o.Side),
-						Quantity: o.FilledQty,
-						Price:    o.FilledPrice,
-					})
-				}
-			}
-			m.executions = execs
 		}
+
+		// Log strategy metrics if running
+		// if m.currentStrategy != nil && m.currentStrategy.Runtime.Status() == StrategyRunning {
+		// 	metrics := m.currentStrategy.Instance.GetMetrics()
+		// 	if len(metrics) > 0 {
+		// 		m.strategyLogger.Infof("METRICS: %v", metrics)
+		// 	}
+		// }
+
 		return m, tickCmd()
 
 	case connMsg:
@@ -448,14 +484,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case connMsgSuccess:
-		m.wsClient = msg.mdClient
-		m.mdSubscriber = msg.mdSubscriber
-		m.userSync = msg.tradingClient
-		m.tradingSubscriber = msg.tradingSubscriber
-		m.portfolioTracker = msg.portfolioTracker
+		m.config = msg.config
+		m.tm = msg.tokenManager
+		m.om = msg.orderManager
+		m.marketDataClient = msg.mdClient
+		m.marketDataSubscriptionManager = msg.mdSubscriber
+		m.tradingClient = msg.tradingClient
+		m.tradingClientSubscriptionManager = msg.tradingSubscriber
+		m.pt = msg.portfolioTracker
 		m.connected = true
 
-		m.mainLogger.Println(">>> CONNECTION SUCCESSFUL <<<")
+		m.mainLogger.Info(">>> CONNECTION SUCCESSFUL <<<")
 		m.statusMsg = successStyle.Render("Connected to Tradovate")
 		return m, nil
 
@@ -464,7 +503,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mainLogger.Errorf("Editor error: %v", msg.err)
 			m.statusMsg = errorStyle.Render("Failed to open editor")
 		} else {
-			m.mainLogger.Println(">>> Config editor closed, proceeding... <<<")
+			m.mainLogger.Info(">>> Config editor closed, proceeding... <<<")
 			if msg.nextAction == "connect" {
 				return m, m.connectCmd()
 			}
@@ -494,7 +533,6 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	m.errorMsg = ""
 
 	// If on commands tab and search is active, handle search input
 	if m.activeTab == TabCommands && m.searchActive {
@@ -524,26 +562,18 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.scrollOffset = 0
 
 	case "2":
-		m.activeTab = TabOrderManagement
-		m.scrollOffset = 0
-
-	case "3":
-		m.activeTab = TabPositions
-		m.scrollOffset = 0
-
-	case "4":
-		m.activeTab = TabOrders
-		m.scrollOffset = 0
-
-	case "5":
-		m.activeTab = TabExecutions
-		m.scrollOffset = 0
-
-	case "6":
 		m.activeTab = TabStrategy
 		m.scrollOffset = 0
 
-	case "7":
+	case "3":
+		m.activeTab = TabOrderManagement
+		m.scrollOffset = 0
+
+	case "4":
+		m.activeTab = TabPositions
+		m.scrollOffset = 0
+
+	case "5":
 		m.activeTab = TabCommands
 		m.scrollOffset = 0
 
@@ -554,40 +584,44 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Shift Commands (Main Menu Actions)
 	case "!": // Shift+1
 		if m.connected {
-			m.mainLogger.Println(">>> DISCONNECTING... <<<")
+			m.mainLogger.Info(">>> DISCONNECTING... <<<")
 			m.connected = false
 
-			if m.portfolioTracker != nil {
-				_ = m.portfolioTracker.Stop()
-				m.portfolioTracker = nil
+			m.stopCurrentStrategy()
+
+			if m.tm != nil {
+				m.tm.StopTokenRefreshMonitor()
 			}
 
-			if m.mdSubscriber != nil {
-				_ = m.mdSubscriber.UnsubscribeAll()
+			if m.pt != nil {
+				_ = m.pt.Stop()
+				m.pt = nil
 			}
 
-			if m.wsClient != nil {
-				_ = m.wsClient.Disconnect()
-				m.wsClient = nil
+			if m.marketDataSubscriptionManager != nil {
+				_ = m.marketDataSubscriptionManager.UnsubscribeAll()
 			}
 
-			if m.userSync != nil {
-				_ = m.userSync.Disconnect()
-				m.userSync = nil
+			if m.marketDataClient != nil {
+				_ = m.marketDataClient.Disconnect()
+				m.marketDataClient = nil
 			}
 
-			m.mainLogger.Println(">>> SUCCESSFULLY DISCONNECTED <<<")
+			if m.tradingClient != nil {
+				_ = m.tradingClient.Disconnect()
+				m.tradingClient = nil
+			}
+
+			m.statusMsg = errorStyle.Render("Disconnected from Tradovate")
+			m.mainLogger.Info(">>> SUCCESSFULLY DISCONNECTED <<<")
 			return m, nil
 		} else {
-			m.mainLogger.Println(">>> STARTING CONNECTION SEQUENCE... <<<")
+			m.mainLogger.Info(">>> STARTING CONNECTION SEQUENCE... <<<")
 
 			// Check if config exists
 			if _, err := os.Stat(m.configPath); os.IsNotExist(err) {
-				m.mainLogger.Println("Config not found. Creating default and opening editor...")
-				if err := config.CreateDefaultConfig(m.configPath); err != nil {
-					m.mainLogger.Errorf("Failed to create config: %v", err)
-					return m, nil
-				}
+
+				config, _ := config.LoadOrCreateConfig(m.mainLogger)
 
 				// Open editor instead of trying to open external notepad
 				content, _ := os.ReadFile(m.configPath)
@@ -595,51 +629,37 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.configEditor.SetWidth(m.width - 4)
 				m.configEditor.SetHeight(m.height - 10)
 				m.mode = modeEditor
+
+				m.config = config
+
 				return m, nil
 			}
+			m.mainLogger.Info(m.config == nil)
 
 			return m, m.connectCmd()
 		}
 	case "@": // Shift+2
-		if !m.connected {
-			m.errorMsg = "Must connect first (!)"
-			return m, nil
-		}
-		if m.mdSubscriber == nil {
-			m.errorMsg = "Market Data Subscriber not ready"
-			return m, nil
-		}
-		m.mainLogger.Printf(">>> SUBSCRIBING TO %s... <<<", m.currentSymbol)
-		go func() {
-			if err := m.mdSubscriber.SubscribeQuote(m.currentSymbol); err != nil {
-				m.mainLogger.Errorf("Subscribe error: %v", err)
-			}
-		}()
-
-	case "#": // Shift+3
 		if !m.connected {
 			return m, nil
 		}
 		m.mode = modeCommand
 		m.commandInput = ":strategy "
 		m.statusMsg = "Enter strategy name..."
-
-	case "$": // Shift+4
-		m.mainLogger.Println(">>> EXPORTING MAIN LOG TO FILE... <<<")
+	case "#": // Shift+3
+		m.mainLogger.Info(">>> EXPORTING MAIN LOG TO FILE... <<<")
 		content := m.mainLogger.ExportToString()
 		logsDir := filepath.Join(config.GetProjectRoot(), "external", "logs")
 		_ = os.MkdirAll(logsDir, 0755)
 		filename := filepath.Join(logsDir, "main_log_"+time.Now().Format("20060102_150405")+".txt")
 		err := os.WriteFile(filename, []byte(content), 0644)
 		if err != nil {
-			m.errorMsg = "Export failed: " + err.Error()
+			m.statusMsg = errorStyle.Render("Export failed: " + err.Error())
 			m.mainLogger.Errorf("Export failed: %v", err)
 		} else {
 			m.statusMsg = successStyle.Render("Log exported to " + filename)
 			m.mainLogger.Printf("Log successfully exported to %s", filename)
 		}
-
-	case "%": // Shift+5
+	case "$": // Shift+4
 		content, err := os.ReadFile(m.configPath)
 		if err != nil {
 			// Try to create it if it doesn't exist
@@ -647,7 +667,7 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				_ = config.CreateDefaultConfig(m.configPath)
 				content, _ = os.ReadFile(m.configPath)
 			} else {
-				m.errorMsg = "Failed to read config: " + err.Error()
+				m.statusMsg = errorStyle.Render("Failed to read config: " + err.Error())
 				return m, nil
 			}
 		}
@@ -655,13 +675,12 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.configEditor.SetWidth(m.width - 4)
 		m.configEditor.SetHeight(m.height - 10)
 		m.mode = modeEditor
-		m.statusMsg = "Editing config. Press Ctrl+S to save, ESC to exit"
+		m.statusMsg = ""
 		m.mainLogger.Printf(">>> CONFIG EDITOR OPENED: %s <<<", m.configPath)
-
-	case "^": // Shift+6
+	case "%": // Shift+5
 		m.mainLogger.Clear()
 		m.logScrollOffset = 0
-		m.mainLogger.Println(">>> LOG CLEARED <<<")
+		m.mainLogger.Info(">>> LOG CLEARED <<<")
 
 	case "ctrl+f", "f":
 		// Activate search on commands page
@@ -715,6 +734,27 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.orderLogScrollOffset > 0 {
 				m.orderLogScrollOffset--
 			}
+		case TabStrategy:
+			// Calculate max scroll for Main Log to clamp "infinity"
+			availableLines := m.height - 11
+			if availableLines < 1 {
+				availableLines = 1
+			}
+
+			entriesLen := m.strategyLogger.Count()
+			maxScroll := entriesLen - availableLines
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+
+			// Clamp if we are past the bottom (e.g. from auto-scroll)
+			if m.stratLogScrollOffset > maxScroll {
+				m.stratLogScrollOffset = maxScroll
+			}
+
+			if m.stratLogScrollOffset > 0 {
+				m.stratLogScrollOffset--
+			}
 		default:
 			if m.scrollOffset > 0 {
 				m.scrollOffset--
@@ -758,6 +798,23 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.orderLogScrollOffset++
 			}
 
+		case TabStrategy:
+			// Calculate max scroll for Order Log
+			availableLines := m.height - 11
+			if availableLines < 1 {
+				availableLines = 1
+			}
+
+			entriesLen := m.strategyLogger.Count()
+			maxScroll := entriesLen - availableLines
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+
+			if m.stratLogScrollOffset < maxScroll {
+				m.stratLogScrollOffset++
+			}
+
 		default:
 			contentHeight := m.height - 5
 			fullContent := m.renderCommandsContent()
@@ -778,6 +835,8 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.logScrollOffset = 0
 		case TabOrderManagement:
 			m.orderLogScrollOffset = 0
+		case TabStrategy:
+			m.stratLogScrollOffset = 0
 		default:
 			m.scrollOffset = 0
 		}
@@ -812,7 +871,19 @@ func (m model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 
 			m.orderLogScrollOffset = maxScroll
+		case TabStrategy:
+			availableLines := m.height - 11
+			if availableLines < 1 {
+				availableLines = 1
+			}
 
+			entriesLen := m.strategyLogger.Count()
+			maxScroll := entriesLen - availableLines
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+
+			m.stratLogScrollOffset = maxScroll
 		default:
 			contentHeight := m.height - 5
 			fullContent := m.renderCommandsContent()
@@ -869,7 +940,6 @@ func (m model) handleCommandMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc:
 		m.mode = modeNormal
 		m.commandInput = ""
-		m.errorMsg = ""
 
 	case tea.KeyEnter:
 		// Save to history if not empty and not identical to last entry
@@ -967,7 +1037,7 @@ func (m *model) handleEditorMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Save content
 		err := os.WriteFile(m.configPath, []byte(m.configEditor.Value()), 0644)
 		if err != nil {
-			m.errorMsg = "Failed to save config: " + err.Error()
+			m.statusMsg = errorStyle.Render("Failed to save config: " + err.Error())
 			m.mainLogger.Errorf("Save failed: %v", err)
 		} else {
 			m.statusMsg = successStyle.Render("Config saved successfully")
@@ -1017,6 +1087,7 @@ func (m model) executeCommand() (model, tea.Cmd) {
 	// Force scroll to bottom when a command is executed
 	m.logScrollOffset = 1000000
 	m.orderLogScrollOffset = 1000000
+	m.stratLogScrollOffset = 1000000
 
 	cmd := strings.TrimPrefix(m.commandInput, ":")
 	parts := strings.Fields(cmd)
@@ -1031,16 +1102,20 @@ func (m model) executeCommand() (model, tea.Cmd) {
 
 	case "buy", "sell":
 		if !m.connected {
-			m.errorMsg = "Must be connected to API to trade"
+			m.statusMsg = errorStyle.Render("Must be connected to API to trade")
+			return m, nil
+		}
+		if m.om != nil && m.om.GetRiskManager().IsDailyLossExceeded(m.totalPnL) {
+			m.statusMsg = errorStyle.Render("Trading disabled: daily loss limit exceeded")
 			return m, nil
 		}
 		if m.tradingMode != ModeLive {
-			m.errorMsg = "Cannot place orders in Visual mode. Switch to Live mode with :mode live"
+			m.statusMsg = errorStyle.Render("Cannot place orders in Visual mode. Switch to Live mode with :mode live")
 			m.mainLogger.Errorf("Order rejected: Not in Live mode")
 			return m, nil
 		}
 		if len(parts) < 3 {
-			m.errorMsg = "Usage: :" + parts[0] + " <symbol> <quantity>"
+			m.statusMsg = errorStyle.Render("Usage: :" + parts[0] + " <symbol> <quantity>")
 			return m, nil
 		}
 
@@ -1048,18 +1123,18 @@ func (m model) executeCommand() (model, tea.Cmd) {
 		qtyStr := parts[2]
 
 		if !strings.HasPrefix(qtyStr, "") {
-			m.errorMsg = "Usage: :" + parts[0] + " <symbol> <quantity>"
+			m.statusMsg = errorStyle.Render("Usage: :" + parts[0] + " <symbol> <quantity>")
 			return m, nil
 		}
 
 		var qty int
 		if _, err := fmt.Sscanf(qtyStr, "%d", &qty); err != nil {
-			m.errorMsg = "Invalid quantity format. Use a number"
+			m.statusMsg = errorStyle.Render("Invalid quantity format. Use a number")
 			return m, nil
 		}
 
-		if m.orderManager == nil {
-			m.errorMsg = "Order Manager not initialized"
+		if m.om == nil {
+			m.statusMsg = errorStyle.Render("Order Manager not initialized")
 			m.mainLogger.Error("Order Manager not initialized")
 			return m, nil
 		}
@@ -1071,9 +1146,9 @@ func (m model) executeCommand() (model, tea.Cmd) {
 
 		m.mainLogger.Printf("Submitting %s order for %d %s...", strings.ToUpper(parts[0]), qty, symbol)
 
-		order, err := m.orderManager.SubmitMarketOrder(symbol, side, qty)
+		order, err := m.om.SubmitMarketOrder(symbol, side, qty)
 		if err != nil {
-			m.errorMsg = "Order failed: " + err.Error()
+			m.statusMsg = errorStyle.Render("Order failed: " + err.Error())
 			m.mainLogger.Errorf("Order failed: %v", err)
 			return m, nil
 		}
@@ -1084,16 +1159,16 @@ func (m model) executeCommand() (model, tea.Cmd) {
 
 	case "cancel":
 		if !m.connected {
-			m.errorMsg = "Must be connected to API to cancel orders"
+			m.statusMsg = errorStyle.Render("Must be connected to API to cancel orders")
 			return m, nil
 		}
 		if m.tradingMode != ModeLive {
-			m.errorMsg = "Cannot cancel orders in Visual mode"
+			m.statusMsg = errorStyle.Render("Cannot cancel orders in Visual mode")
 			m.mainLogger.Errorf("Cancel rejected: Not in Live mode")
 			return m, nil
 		}
 		if len(parts) < 2 {
-			m.errorMsg = "Usage: :cancel <orderID>"
+			m.statusMsg = errorStyle.Render("Usage: :cancel <orderID>")
 			return m, nil
 		}
 		orderID := parts[1]
@@ -1103,34 +1178,42 @@ func (m model) executeCommand() (model, tea.Cmd) {
 
 	case "flatten":
 		if !m.connected {
-			m.errorMsg = "Must be connected to API to flatten positions"
+			m.statusMsg = errorStyle.Render("Must be connected to API to flatten positions")
 			return m, nil
 		}
 		if m.tradingMode != ModeLive {
-			m.errorMsg = "Cannot flatten in Visual mode"
+			m.statusMsg = errorStyle.Render("Cannot flatten in Visual mode")
 			m.mainLogger.Errorf("Flatten rejected: Not in Live mode")
 			return m, nil
 		}
+
+		if m.om != nil {
+			m.stopCurrentStrategy()
+			if err := m.om.FlattenPositions(); err != nil {
+				m.statusMsg = errorStyle.Render("Flatten failed: " + err.Error())
+				return m, nil
+			}
+		}
 		m.statusMsg = successStyle.Render("All positions flattened")
-		m.mainLogger.Println("All positions flattened")
-		m.orderLogger.Println("FLATTEN - All positions closed")
+		m.mainLogger.Info("All positions flattened")
+		m.orderLogger.Info("FLATTEN - All positions closed")
 
 	case "mode":
 		if len(parts) < 2 {
-			m.errorMsg = "Usage: :mode <live|visual>"
+			m.statusMsg = errorStyle.Render("Usage: :mode <live|visual>")
 			return m, nil
 		}
 		switch strings.ToLower(parts[1]) {
 		case "l", "L":
 			m.tradingMode = ModeLive
 			m.statusMsg = successStyle.Render("Switched to LIVE mode")
-			m.mainLogger.Println("Switched to LIVE trading mode")
+			m.mainLogger.Info("Switched to LIVE trading mode")
 		case "v", "V":
 			m.tradingMode = ModeVisual
 			m.statusMsg = "Switched to VISUAL mode"
-			m.mainLogger.Println("Switched to VISUAL mode")
+			m.mainLogger.Info("Switched to VISUAL mode")
 		default:
-			m.errorMsg = "Invalid mode. Use l for'live' or v for 'visual'"
+			m.statusMsg = errorStyle.Render("Invalid mode. Use l for'live' or v for 'visual'")
 		}
 
 	// case "buy", "sell", "cancel", "flatten", "mode", "strategy", "export", "main", "om", "pos", "orders", "help":
@@ -1143,7 +1226,7 @@ func (m model) executeCommand() (model, tea.Cmd) {
 	case "config":
 		content, err := os.ReadFile(m.configPath)
 		if err != nil {
-			m.errorMsg = "Failed to read config: " + err.Error()
+			m.statusMsg = errorStyle.Render("Failed to read config: " + err.Error())
 			return m, nil
 		}
 		m.isLogView = false
@@ -1159,7 +1242,7 @@ func (m model) executeCommand() (model, tea.Cmd) {
 		if m.configEditor.Value() != "" && !m.isLogView {
 			err := os.WriteFile(m.configPath, []byte(m.configEditor.Value()), 0644)
 			if err != nil {
-				m.errorMsg = "Failed to save config: " + err.Error()
+				m.statusMsg = errorStyle.Render("Failed to save config: " + err.Error())
 			} else {
 				m.statusMsg = successStyle.Render("Config saved")
 			}
@@ -1178,7 +1261,7 @@ func (m model) executeCommand() (model, tea.Cmd) {
 
 	case "export":
 		if len(parts) < 2 {
-			m.errorMsg = "Usage: :export <log|orders>"
+			m.statusMsg = errorStyle.Render("Usage: :export <log|orders>")
 			return m, nil
 		}
 		logsDir := filepath.Join(config.GetProjectRoot(), "external", "logs")
@@ -1189,7 +1272,7 @@ func (m model) executeCommand() (model, tea.Cmd) {
 			filename := filepath.Join(logsDir, "main_log_"+time.Now().Format("20060102_150405")+".txt")
 			err := os.WriteFile(filename, []byte(content), 0644)
 			if err != nil {
-				m.errorMsg = "Export failed: " + err.Error()
+				m.statusMsg = errorStyle.Render("Export failed: " + err.Error())
 			} else {
 				m.statusMsg = successStyle.Render("Log exported to " + filename)
 				m.mainLogger.Printf("Main log exported to %s", filename)
@@ -1200,14 +1283,14 @@ func (m model) executeCommand() (model, tea.Cmd) {
 			filename := filepath.Join(logsDir, "orders_log_"+time.Now().Format("20060102_150405")+".txt")
 			err := os.WriteFile(filename, []byte(content), 0644)
 			if err != nil {
-				m.errorMsg = "Export failed: " + err.Error()
+				m.statusMsg = errorStyle.Render("Export failed: " + err.Error())
 			} else {
 				m.statusMsg = successStyle.Render("Order log exported to " + filename)
 				m.mainLogger.Printf("Order log exported to %s", filename)
 			}
 			return m, nil
 		default:
-			m.errorMsg = "Invalid export target. Use 'log' or 'orders'"
+			m.statusMsg = errorStyle.Render("Invalid export target. Use 'log' or 'orders'")
 		}
 
 	case "main":
@@ -1222,29 +1305,29 @@ func (m model) executeCommand() (model, tea.Cmd) {
 		m.activeTab = TabPositions
 		m.statusMsg = "Switched to Positions"
 
-	case "orders":
-		m.activeTab = TabOrders
-		m.statusMsg = "Switched to Orders"
-
 	case "help":
 		m.activeTab = TabCommands
 		m.statusMsg = "Switched to Commands"
 
 	case "strategy":
-		if m.currentStrategy != nil && m.currentStrategy.Active {
-			m.errorMsg = "Cannot change strategy while running. Stop it first"
+
+		if m.currentStrategy != nil && m.currentStrategy.Runtime.Status() == StrategyRunning {
+			m.statusMsg = errorStyle.Render("Cannot change strategy while running. Stop it first")
 			return m, nil
 		}
 		if len(parts) < 2 {
-			m.errorMsg = "Usage: :strategy <name>"
+			m.statusMsg = errorStyle.Render("Usage: :strategy <name>")
 			return m, nil
 		}
 		stratName := parts[1]
-		strat, err := execution.CreateStrategy(stratName)
+		strat, err := execution.CreateStrategy(stratName, m.strategyLogger)
 		if err != nil {
-			m.errorMsg = "Failed to load strategy: " + err.Error()
+			m.statusMsg = errorStyle.Render("Failed to load strategy: " + err.Error())
 			return m, nil
 		}
+
+		m.activeTab = TabStrategy
+		m.scrollOffset = 0
 
 		m.selectedStrategy = stratName
 		m.currentStrategy = &StrategyState{
@@ -1252,7 +1335,9 @@ func (m model) executeCommand() (model, tea.Cmd) {
 			Params:      strat.GetParams(),
 			Instance:    strat,
 			Description: strat.Description(),
+			Runtime:     &StrategyRuntime{},
 		}
+
 		// Reset params
 		m.strategyParams = make(map[string]string)
 		for _, p := range m.currentStrategy.Params {
@@ -1264,16 +1349,16 @@ func (m model) executeCommand() (model, tea.Cmd) {
 		m.strategyLogger.Printf("Loaded strategy: %s", strat.Name())
 
 	case "set":
-		if m.currentStrategy != nil && m.currentStrategy.Active {
-			m.errorMsg = "Cannot change parameters while strategy is running. Stop it first"
+		if m.currentStrategy != nil && m.currentStrategy.Runtime.Status() == StrategyRunning {
+			m.statusMsg = errorStyle.Render("Cannot change parameters while strategy is running. Stop it first")
 			return m, nil
 		}
 		if m.currentStrategy == nil {
-			m.errorMsg = "No strategy selected. Use :strategy <name> first"
+			m.statusMsg = errorStyle.Render("No strategy selected. Use :strategy <name> first")
 			return m, nil
 		}
 		if len(parts) < 3 {
-			m.errorMsg = "Usage: :set <param> <value>"
+			m.statusMsg = errorStyle.Render("Usage: :set <param> <value>")
 			return m, nil
 		}
 		paramName := parts[1]
@@ -1288,7 +1373,7 @@ func (m model) executeCommand() (model, tea.Cmd) {
 		}
 
 		if !found {
-			m.errorMsg = "Unknown parameter: " + paramName
+			m.statusMsg = errorStyle.Render("Unknown parameter: " + paramName)
 			return m, nil
 		}
 
@@ -1298,117 +1383,212 @@ func (m model) executeCommand() (model, tea.Cmd) {
 
 	case "start":
 		if m.currentStrategy == nil {
-			m.errorMsg = "No strategy selected"
+			m.statusMsg = errorStyle.Render("No strategy selected")
 			return m, nil
 		}
-		if m.currentStrategy.Active {
-			m.errorMsg = "Strategy is already running"
+		if m.om != nil && m.om.GetRiskManager().IsDailyLossExceeded(m.totalPnL) {
+			m.statusMsg = errorStyle.Render("Cannot start strategy: daily loss limit exceeded")
+			m.mainLogger.Error("Cannot start strategy: daily loss limit exceeded")
+			return m, nil
+		}
+		if m.currentStrategy.Runtime.Status() == StrategyRunning {
+			m.statusMsg = errorStyle.Render("Strategy is already running")
 			return m, nil
 		}
 		if !m.connected {
-			m.errorMsg = "Must be connected to start strategy"
+			m.statusMsg = errorStyle.Render("Must be connected to start strategy")
 			return m, nil
 		}
 
 		// Apply params
 		for k, v := range m.strategyParams {
 			if err := m.currentStrategy.Instance.SetParam(k, v); err != nil {
-				m.errorMsg = "Failed to set param " + k + ": " + err.Error()
+				m.statusMsg = errorStyle.Render("Failed to set param " + k + ": " + err.Error())
 				return m, nil
 			}
 		}
 
 		// Init strategy
-		if err := m.currentStrategy.Instance.Init(m.orderManager); err != nil {
-			m.errorMsg = "Failed to initialize strategy: " + err.Error()
+		if err := m.currentStrategy.Instance.Init(m.om); err != nil {
+			m.statusMsg = errorStyle.Render("Failed to initialize strategy: " + err.Error())
 			return m, nil
 		}
 
-		m.currentStrategy.Active = true
 		m.currentStrategy.Symbol = m.strategyParams["symbol"]
-		m.currentStrategy.ReceivedFirstData = false
+
+		m.currentStrategy.Runtime.SetStatus(StrategyStarting)
+
 		m.statusMsg = successStyle.Render("Strategy STARTED")
-		m.strategyLogger.Println(">>> STRATEGY STARTED <<<")
+		m.strategyLogger.Info(">>> STRATEGY STARTED <<<")
 
-		// Subscribe to chart data if symbol is set
-		symbol := m.strategyParams["symbol"]
-		if symbol != "" {
-			m.strategyLogger.Printf("Subscribing to data for %s", symbol)
-			if m.mdSubscriber != nil {
-				go func() {
-					// Ensure we are connected
-					if !m.mdSubscriber.IsConnected() {
-						m.strategyLogger.Warn("No Market Data Connection. Attempting to connect...")
-						if err := m.mdSubscriber.Connect(); err != nil {
-							m.strategyLogger.Errorf("Failed to connect to market data: %v", err)
-							return
+		var lastBar LastBar
+
+		var historicalLoaded bool
+
+		m.marketDataSubscriptionManager.AddChartHandler(func(update marketdata.ChartUpdate) {
+			m.strategyLogger.Infof("CHART UPDATE RECEIVED at %s", time.Now().Format("15:04:05"))
+			m.strategyLogger.Infof("Chart handler called with %d charts", len(update.Charts))
+
+			for _, chart := range update.Charts {
+				m.strategyLogger.Infof("Chart ID: %d | Bars: %d | Ticks: %d | EOH: %v",
+					chart.ID, len(chart.Bars), len(chart.Ticks), chart.EOH)
+
+				// Check for end of history marker
+				if chart.EOH {
+					m.strategyLogger.Info("End of historical data - now receiving live updates")
+
+					// Enable strategy for live trading
+					if s, ok := m.currentStrategy.Instance.(interface{ SetEnabled(bool) }); ok {
+						s.SetEnabled(true)
+						m.strategyLogger.Info("Strategy enabled for LIVE trading")
+						m.strategyLogger.Info("tdsubs: ", m.tradingClientSubscriptionManager.GetActiveSubscriptions())
+						m.strategyLogger.Info("mdsubs: ", m.marketDataSubscriptionManager.GetActiveSubscriptions())
+					}
+
+					historicalLoaded = true
+					continue
+				}
+
+				m.strategyLogger.Infof("=== Chart ID: %d ===", chart.ID)
+				m.strategyLogger.Infof("Number of bars: %d", len(chart.Bars))
+
+				if !historicalLoaded {
+					// Process each bar
+					for _, bar := range chart.Bars {
+						// Skip only exact duplicates (same timestamp AND same close price)
+						if bar.Timestamp == lastBar.Timestamp && bar.Close == lastBar.Close {
+							//fmt.Printf("  ⏭️  Skipping duplicate bar at %s\n", bar.Timestamp)
+							continue
 						}
-						m.strategyLogger.Info("Market data connection established")
+						lastBar = LastBar{Timestamp: bar.Timestamp, Close: bar.Close}
+
+						// Update Strategy
+						if s, ok := m.currentStrategy.Instance.(interface {
+							OnBar(string, float64) error
+						}); ok {
+							s.OnBar(bar.Timestamp, bar.Close)
+						}
+
 					}
 
-					// 1. Subscribe to Quotes for real-time price updates
-					if err := m.mdSubscriber.SubscribeQuote(symbol); err != nil {
-						m.strategyLogger.Errorf("Failed to subscribe to quotes: %v", err)
-					}
+					// PRINT LIVE SMA VALUES
 
-					// 2. Calculate lookback time
-					// Hardcoded to 25 minutes as requested
-					lookbackMinutes := 25
-
-					startTime := time.Now().Add(time.Duration(-lookbackMinutes) * time.Minute)
-					m.strategyLogger.Infof("Requesting %d minutes of historical data for initialization...", lookbackMinutes)
-					// 3. Request Chart for historical and live data
-					params := marketdata.HistoricalDataParams{
-						Symbol: symbol,
-						ChartDescription: marketdata.ChartDesc{
-							UnderlyingType:  "MinuteBar",
-							ElementSize:     1,
-							ElementSizeUnit: "UnderlyingUnits",
-						},
-						TimeRange: marketdata.TimeRange{
-							ClosestTimestamp: startTime.Format(time.RFC3339),
-						},
-					}
-					err := m.mdSubscriber.GetChart(params)
-					if err != nil {
-						m.strategyLogger.Errorf("Failed to subscribe to chart: %v", err)
-					}
-				}()
+					m.strategyLogger.Infof("📊 Current Fast SMA: %.2f | Slow SMA: %.2f",
+						m.currentStrategy.Instance.GetMetrics()["Fast SMA"],
+						m.currentStrategy.Instance.GetMetrics()["Slow SMA"])
+				}
 			}
+		})
+
+		m.strategyLogger.Info("Chart Handler Added")
+
+		// Bar aggregator - collects quotes into minute bars
+		type BarAggregator struct {
+			currentMinute string
+			open          float64
+			high          float64
+			low           float64
+			close         float64
+			firstTick     bool
 		}
+
+		var barAgg = &BarAggregator{firstTick: true}
+
+		livebarcounter := 0
+
+		m.marketDataSubscriptionManager.AddQuoteHandler(func(quote marketdata.Quote) {
+
+			if !historicalLoaded {
+				return
+			}
+
+			if trade, ok := quote.Entries["Trade"]; ok {
+				price := trade.Price
+
+				// Use the quote's actual timestamp, not time.Now()
+				quoteTime, err := time.Parse(time.RFC3339, quote.Timestamp)
+				if err != nil {
+					return
+				}
+
+				currentMinute := quoteTime.UTC().Truncate(time.Minute).Format("2006-01-02T15:04Z")
+
+				// New minute = new bar
+				if currentMinute != barAgg.currentMinute {
+					// Close previous bar if exists
+					if !barAgg.firstTick {
+
+						// Update Strategy
+						if s, ok := m.currentStrategy.Instance.(interface {
+							OnBar(string, float64) error
+						}); ok {
+							s.OnBar(barAgg.currentMinute, barAgg.close)
+						}
+
+						livebarcounter++
+						// m.strategyLogger.Info("LiveBarCount: ", livebarcounter)
+
+						// m.strategyLogger.Infof("   Fast SMA: %.2f | Slow SMA: %.2f",
+						// 	m.currentStrategy.Instance.GetMetrics()["Fast SMA"],
+						// 	m.currentStrategy.Instance.GetMetrics()["Slow SMA"])
+					}
+
+					// Start new bar
+					barAgg.currentMinute = currentMinute
+					barAgg.open = price
+					barAgg.high = price
+					barAgg.low = price
+					barAgg.close = price
+					barAgg.firstTick = false
+				} else {
+					// Update current bar
+					if price > barAgg.high {
+						barAgg.high = price
+					}
+					if price < barAgg.low {
+						barAgg.low = price
+					}
+					barAgg.close = price
+				}
+			}
+		})
+
+		m.strategyLogger.Info("Quote Handler added")
+
+		symbol := m.strategyParams["symbol"]
+		go func() {
+			m.marketDataSubscriptionManager.SubscribeQuote(symbol)
+
+			mdparams := marketdata.HistoricalDataParams{
+				Symbol: symbol,
+				ChartDescription: marketdata.ChartDesc{
+					UnderlyingType:  "MinuteBar",
+					ElementSize:     1,
+					ElementSizeUnit: "UnderlyingUnits",
+				},
+				TimeRange: marketdata.TimeRange{
+					ClosestTimestamp: time.Now().Format(time.RFC3339),
+					AsMuchAsElements: 25,
+				},
+			}
+
+			err2 := m.marketDataSubscriptionManager.GetChart(mdparams)
+			if err2 != nil {
+				m.strategyLogger.Errorf("Failed to get chart: %v", err2)
+			}
+
+			m.currentStrategy.Runtime.SetStatus(StrategyRunning)
+
+			m.strategyLogger.Info("tdsubs: ", m.tradingClientSubscriptionManager.GetActiveSubscriptions())
+			m.strategyLogger.Info("mdsubs: ", m.marketDataSubscriptionManager.GetActiveSubscriptions())
+		}()
 
 	case "stop":
-		if m.currentStrategy == nil {
-			return m, nil
-		}
-		if !m.currentStrategy.Active {
-			m.errorMsg = "Strategy is not running"
-			return m, nil
-		}
 
-		// Unsubscribe from chart/quote
-		symbol := m.strategyParams["symbol"]
-		if symbol != "" && m.mdSubscriber != nil {
-			m.strategyLogger.Printf("Unsubscribing from data for %s...", symbol)
-			go func() {
-				if err := m.mdSubscriber.UnsubscribeChart(symbol); err != nil {
-					m.strategyLogger.Warnf("Unsubscribe chart failed: %v", err)
-				}
-				if err := m.mdSubscriber.UnsubscribeQuote(symbol); err != nil {
-					m.strategyLogger.Warnf("Unsubscribe quote failed: %v", err)
-				}
-			}()
-		}
-
-		// Reset strategy instance state so it can be re-initialized
-		m.currentStrategy.Instance.Reset()
-		m.currentStrategy.Active = false
-
-		m.statusMsg = "Strategy STOPPED"
-		m.strategyLogger.Println(">>> STRATEGY STOPPED <<<")
+		m.stopCurrentStrategy()
 
 	default:
-		m.errorMsg = fmt.Sprintf("Unknown command: %s", parts[0])
+		m.statusMsg = errorStyle.Render(fmt.Sprintf("Unknown command: %s", parts[0]))
 	}
 
 	return m, nil
@@ -1444,7 +1624,7 @@ func (m model) View() string {
 func (m model) renderTabs() string {
 	tabs := []string{}
 
-	tabNames := []string{"Main", "Order Mgmt", "Positions", "Orders", "Executions", "Strategy", "Commands"}
+	tabNames := []string{"Main", "Strategy", "Order Mgmt", "Positions", "Commands"}
 	for i, name := range tabNames {
 		style := inactiveTabStyle
 		if Tab(i) == m.activeTab {
@@ -1460,7 +1640,7 @@ func (m model) renderContent() string {
 	contentHeight := m.height - 5
 
 	if m.mode == modeEditor {
-		footer := "[Ctrl+S: Save | :w: Save | :x: Save & Exit | ESC: Cancel]"
+		footer := "[Ctrl+S: Save | ESC: Cancel]"
 		if m.isLogView {
 			footer = "[Ctrl+E: Export to File | Ctrl+C: Copy | Ctrl+A: All | ESC: Exit]"
 		}
@@ -1480,10 +1660,6 @@ func (m model) renderContent() string {
 		return content
 	case TabPositions:
 		content = m.renderPositions()
-	case TabOrders:
-		content = m.renderOrders()
-	case TabExecutions:
-		content = m.renderExecutions()
 	case TabStrategy:
 		content = m.renderStrategyTab(contentHeight)
 		return content
@@ -1558,16 +1734,10 @@ func (m model) renderMainHub(contentHeight int) string {
 		desc string
 	}{
 		{"!", connectDesc},
-		{"@", "Receive Market Data"},
-		{"#", "Select Strategy"},
-		{"$", "Export Main Log"},
-		{"%", "Edit Config"},
-		{"^", "Clear Log"},
-		{"", ""},
-		{"M", "Main"},
-		{"O", "Order Mgmt"},
-		{"P", "Positions"},
-		{"T", "Trades"},
+		{"@", "Select Strategy"},
+		{"#", "Export Main Log"},
+		{"$", "Edit Config"},
+		{"%", "Clear Log"},
 	}
 
 	for _, item := range menuItems {
@@ -1582,7 +1752,7 @@ func (m model) renderMainHub(contentHeight int) string {
 			// Only allow specific commands when disconnected
 			// !, $, %, ^ are allowed
 			switch item.key {
-			case "!", "$", "%", "^":
+			case "!", "#", "$", "%":
 				enabled = true
 			default:
 				enabled = false
@@ -1816,12 +1986,12 @@ func (m model) renderOrderManagement(contentHeight int) string {
 		unrealizedStyle = errorStyle
 	}
 
-	leftPanel.WriteString(fmt.Sprintf("Total P&L:      %s\n", pnlStyle.Render(fmt.Sprintf("$%.2f", m.totalPnL))))
-	leftPanel.WriteString(fmt.Sprintf("Realized P&L:   %s\n", realizedStyle.Render(fmt.Sprintf("$%.2f", m.realizedPnL))))
-	leftPanel.WriteString(fmt.Sprintf("Unrealized P&L: %s\n", unrealizedStyle.Render(fmt.Sprintf("$%.2f", m.unrealizedPnL))))
+	leftPanel.WriteString(fmt.Sprintf("Total P&L:			 %s\n", pnlStyle.Render(fmt.Sprintf("$%.2f", m.totalPnL))))
+	leftPanel.WriteString(fmt.Sprintf("Daily Realized P&L:	 %s\n", realizedStyle.Render(fmt.Sprintf("$%.2f", m.dailyrealizedPnL))))
+	leftPanel.WriteString(fmt.Sprintf("Session Realized P&L: %s\n", realizedStyle.Render(fmt.Sprintf("$%.2f", m.realizedPnL))))
+	leftPanel.WriteString(fmt.Sprintf("Unrealized P&L: 		 %s\n", unrealizedStyle.Render(fmt.Sprintf("$%.2f\n", m.unrealizedPnL))))
 	leftPanel.WriteString(fmt.Sprintf("Open Positions: %d\n", len(m.positions)))
-	leftPanel.WriteString(fmt.Sprintf("Active Orders:  %d\n", len(m.orders)))
-	leftPanel.WriteString(fmt.Sprintf("Today's Trades: %d\n\n", len(m.executions)))
+	leftPanel.WriteString(fmt.Sprintf("Total Orders: %d\n", len(m.orders)))
 
 	if m.tradingMode == ModeLive {
 		leftPanel.WriteString("\n\n═══ LIVE ACTIONS ═══\n\n")
@@ -1880,15 +2050,36 @@ func (m model) renderStrategyTab(contentHeight int) string {
 	leftPanel.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")).Render("═══ STRATEGY CONTROL ═══") + "\n\n")
 
 	// Strategy Status
+
 	statusColor := "196" // Red
 	statusText := "INACTIVE"
-	if m.currentStrategy != nil && m.currentStrategy.Active {
-		if m.currentStrategy.ReceivedFirstData {
-			statusColor = "46" // Green
-			statusText = "RUNNING"
-		} else {
+
+	if m.currentStrategy != nil {
+		switch m.currentStrategy.Runtime.Status() {
+		case StrategyDisabled:
+			statusColor = "196" // Red
+			statusText = "INACTIVE"
+
+		case StrategyStarting:
 			statusColor = "214" // Orange
 			statusText = "STARTING..."
+
+		case StrategyRunning:
+			statusColor = "46" // Green
+			statusText = "RUNNING"
+
+		case StrategyError:
+			statusColor = "196" // Red
+			statusText = "ERROR"
+
+		case StrategyStopping:
+			statusColor = "214" // Orange
+			statusText = "STOPPING..."
+
+		case StrategyStopped:
+			statusColor = "196" // Red
+			statusText = "INACTIVE"
+
 		}
 	}
 
@@ -1935,13 +2126,29 @@ func (m model) renderStrategyTab(contentHeight int) string {
 	var midPanel strings.Builder
 	midPanel.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")).Render("═══ PARAM VIEW ═══") + "\n\n")
 
-	if m.currentStrategy != nil && m.currentStrategy.Active {
+	if m.currentStrategy != nil && m.currentStrategy.Runtime.Status() == StrategyRunning {
 		metrics := m.currentStrategy.Instance.GetMetrics()
 		if len(metrics) > 0 {
-			for name, val := range metrics {
+			// Sort keys for consistent display order
+			keys := make([]string, 0, len(metrics))
+			for k := range metrics {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+
+			for _, name := range keys {
+				val := metrics[name]
 				midPanel.WriteString(fmt.Sprintf("%-12s: ", name))
 				midPanel.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Render(fmt.Sprintf("%.2f", val)) + "\n")
 			}
+
+			// Log metrics periodically (optional, done here on every render might be too much,
+			// but user asked for "print values as they update".
+			// Better place is in the update loop, but this fulfills "print to strategy log")
+			// However, doing it in Render (View) is bad practice (side effects).
+			// I will NOT add the logging here to avoid log spam 60 times a second.
+			// Instead, I'll rely on the OnBar/OnTick logic I enabled earlier which already logs.
+			// But I WILL sort the display here.
 		} else {
 			midPanel.WriteString("Waiting for data...")
 		}
@@ -1962,7 +2169,6 @@ func (m model) renderStrategyTab(contentHeight int) string {
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, leftContent, midContent, rightContent)
 }
-
 func (m model) renderPositions() string {
 	if len(m.positions) == 0 {
 		return "No positions"
@@ -1986,48 +2192,7 @@ func (m model) renderPositions() string {
 
 	return sb.String()
 }
-func (m model) renderOrders() string {
-	if len(m.orders) == 0 {
-		return "No active orders"
-	}
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%-8s %-10s %6s %8s %12s %10s %s\n", "ID", "Symbol", "Side", "Qty", "Price", "Status", "Time"))
-	sb.WriteString(strings.Repeat("─", 70) + "\n")
 
-	for _, order := range m.orders {
-		sb.WriteString(fmt.Sprintf("%-8s %-10s %6s %8d %12.2f %10s %s\n",
-			order.ID,
-			order.Symbol,
-			order.Side,
-			order.Quantity,
-			order.Price,
-			order.Status,
-			order.Time.Format("15:04:05"),
-		))
-	}
-
-	return sb.String()
-}
-func (m model) renderExecutions() string {
-	if len(m.executions) == 0 {
-		return "No executions"
-	}
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%-20s %-10s %6s %8s %12s\n", "Time", "Symbol", "Side", "Qty", "Price"))
-	sb.WriteString(strings.Repeat("─", 60) + "\n")
-
-	for _, exec := range m.executions {
-		sb.WriteString(fmt.Sprintf("%-20s %-10s %6s %8d %12.2f\n",
-			exec.Time.Format("15:04:05"),
-			exec.Symbol,
-			exec.Side,
-			exec.Quantity,
-			exec.Price,
-		))
-	}
-
-	return sb.String()
-}
 func (m model) renderCommandsContent() string {
 	var sb strings.Builder
 	// Search bar
@@ -2156,10 +2321,6 @@ func (m model) renderStatusBar() string {
 	if !m.connected {
 		connColor = "196" // Red
 	}
-	pnlStyle := successStyle
-	if m.totalPnL < 0 {
-		pnlStyle = errorStyle
-	}
 
 	modeIndicator := ""
 	if m.tradingMode == ModeLive {
@@ -2169,14 +2330,13 @@ func (m model) renderStatusBar() string {
 	}
 
 	left := fmt.Sprintf("%s Connected%s", lipgloss.NewStyle().Foreground(lipgloss.Color(connColor)).Render(connStatus), modeIndicator)
-	right := pnlStyle.Render(fmt.Sprintf("P&L: $%.2f", m.totalPnL))
 
 	// Calculate spacing safely to avoid negative repeat counts
-	spacing := m.width - lipgloss.Width(left) - lipgloss.Width(right)
+	spacing := m.width - lipgloss.Width(left)
 	if spacing < 1 {
 		spacing = 1
 	}
-	statusText := left + strings.Repeat(" ", spacing) + right
+	statusText := left + strings.Repeat(" ", spacing)
 
 	if m.statusMsg != "" {
 		statusText = m.statusMsg
@@ -2189,11 +2349,8 @@ func (m model) renderCommandBar() string {
 	switch m.mode {
 	case modeCommand:
 		content = m.commandInput
-		if m.errorMsg != "" {
-			content += "  " + errorStyle.Render(m.errorMsg)
-		}
 	case modeEditor:
-		content = "EDITOR: Type content, ':' for commands, 'Ctrl+S' to save, 'ESC' to exit"
+		content = "EDITOR: Type content, 'Ctrl+S' to save, 'ESC' to exit"
 	default:
 		switch {
 		case m.activeTab == TabCommands && m.searchActive:
@@ -2201,171 +2358,270 @@ func (m model) renderCommandBar() string {
 		case m.activeTab == TabCommands:
 			content = "w/s or ↑/↓ to scroll, W=top, S=bottom, f=search, :=command, q=quit"
 		case m.activeTab == TabMain || m.activeTab == TabOrderManagement:
-			content = "w/s to scroll logs, :=command, a/d or 1-6 to switch tabs, q=quit"
+			content = "w/s to scroll logs, :=command, a/d or 1-5 to switch tabs, q=quit"
 		default:
-			content = "Press ':' for commands, 'q' to quit, 'a/d' or '1-6' to switch tabs"
+			content = "Press ':' for commands, 'q' to quit, 'a/d' or '1-5' to switch tabs"
 		}
 	}
 
 	return commandBarStyle.Width(m.width).Render(content)
 }
 
+var sessionStart time.Time
+
+type LastBar struct {
+	Timestamp string
+	Close     float64
+}
+
+func (m model) stopCurrentStrategy() tea.Cmd {
+
+	if m.currentStrategy == nil {
+		m.statusMsg = errorStyle.Render("No strategy selected")
+		//m.currentStrategy.Runtime.SetStatus(prevStatus)
+		return nil
+	}
+
+	if m.currentStrategy.Runtime.Status() != StrategyRunning {
+		m.statusMsg = errorStyle.Render("Strategy is not running")
+		//m.currentStrategy.Runtime.SetStatus(prevStatus)
+		return nil
+	}
+	m.currentStrategy.Runtime.SetStatus(StrategyStopping)
+
+	// Reset strategy instance state so it can be re-initialized
+	m.currentStrategy.Instance.Reset()
+	m.currentStrategy.Runtime.SetStatus(StrategyStopped)
+
+	m.statusMsg = successStyle.Render("Strategy STOPPED")
+	m.strategyLogger.Info(">>> STRATEGY STOPPED <<<")
+	return nil
+}
+
 func (m model) connectCmd() tea.Cmd {
 	return func() tea.Msg {
-		// 1. Load Config
-		cfg, err := config.LoadOrCreateConfig()
-		if err != nil {
-			return connMsg{err: fmt.Errorf("config error: %v", err)}
+		var cfg *config.Config
+		var err error
+
+		if m.config == nil {
+			cfg, err = config.LoadOrCreateConfig(m.mainLogger)
+			if err != nil {
+				return connMsg{err: fmt.Errorf("config load error: %w", err)}
+			}
+		} else {
+			cfg = m.config
 		}
 
-		// 2. Authenticate
-		tm := auth.GetTokenManager()
-		tm.SetCredentials(
-			cfg.Tradovate.AppID,
-			cfg.Tradovate.AppVersion,
-			cfg.Tradovate.Chl,
-			cfg.Tradovate.Cid,
-			cfg.Tradovate.DeviceID,
-			cfg.Tradovate.Environment,
-			cfg.Tradovate.Username,
-			cfg.Tradovate.Password,
-			cfg.Tradovate.Sec,
-			cfg.Tradovate.Enc,
-		)
+		tm := auth.NewTokenManager(cfg)
+		tm.SetLogger(m.mainLogger)
 
+		m.mainLogger.Info("attempting auth")
+		// Authenticate
 		if err := tm.Authenticate(); err != nil {
-			return connMsg{err: fmt.Errorf("auth error: %v", err)}
+			// ADD MORE CONTEXT HERE
+			m.mainLogger.Errorf("Authentication failed: %v", err)
+			return connMsg{err: fmt.Errorf("auth error: %w", err)}
 		}
 
-		// 3. Get MD Token
-		mdToken, err := tm.GetMDAccessToken()
-		if err != nil {
-			return connMsg{err: fmt.Errorf("md token error: %v", err)}
-		}
+		sessionStart = time.Now().UTC()
 
-		// Get Access Token for Trading
+		m.mainLogger.Infof("Session Start Time: %s", sessionStart)
+
+		accesstoken, _ := tm.GetAccessToken()
+		m.mainLogger.Info("maintoken: ", accesstoken)
+		m.mainLogger.Info("Authentication Successful")
+
+		om := execution.NewOrderManager(tm, cfg, m.orderLogger)
+
+		var marketDataClient *tradovate.TradovateWebSocketClient
+		var tradingClient *tradovate.TradovateWebSocketClient
+		var marketDataSubscriptionManager *tradovate.DataSubscriber
+		var tradingClientSubscriptionManager *tradovate.DataSubscriber
+
+		//Get fresh tokens
 		accessToken, err := tm.GetAccessToken()
 		if err != nil {
-			return connMsg{err: fmt.Errorf("token error: %v", err)}
+			return connMsg{err: fmt.Errorf("failed to get access token: %w", err)}
 		}
+		m.mainLogger.Info("Auth token aquired")
 
-		// 4. Initialize WS Clients
+		tm.SetLogger(m.mainLogger)
 
-		// Market Data Client
-		mdClient := tradovate.NewTradovateWebSocketClient(mdToken, cfg.Tradovate.Environment, "md")
-		mdClient.SetLogger(m.mainLogger)
+		mdToken, err := tm.GetMDAccessToken()
+		if err != nil {
+			return connMsg{err: fmt.Errorf("failed to get MD token: %w", err)}
+		}
+		m.mainLogger.Info("Market data token aquired")
 
-		// Trading Client
-		tradingClient := tradovate.NewTradovateWebSocketClient(accessToken, cfg.Tradovate.Environment, "")
+		// Create new WebSocket clients
+		marketDataClient = tradovate.NewTradovateWebSocketClient(mdToken, cfg.Tradovate.Environment, "md")
+		marketDataClient.SetLogger(m.mainLogger)
+
+		tradingClient = tradovate.NewTradovateWebSocketClient(accessToken, cfg.Tradovate.Environment, "")
 		tradingClient.SetLogger(m.mainLogger)
 
-		// Create Subscribers
-		mdSubscriber := tradovate.NewDataSubscriber(mdClient)
-		mdSubscriber.SetLogger(m.mainLogger)
+		// Create subscription managers
+		marketDataSubscriptionManager = tradovate.NewDataSubscriptionManager(marketDataClient)
+		marketDataSubscriptionManager.SetLogger(m.strategyLogger)
 
-		tradingSubscriber := tradovate.NewDataSubscriber(tradingClient)
+		tradingClientSubscriptionManager = tradovate.NewDataSubscriptionManager(tradingClient)
+		tradingClientSubscriptionManager.SetLogger(m.mainLogger)
 
-		tradingSubscriber.SetLogger(m.mainLogger)
+		// Connect the clients
+		if err := marketDataSubscriptionManager.Connect(); err != nil {
+			return connMsg{err: fmt.Errorf("Error connecting market data client: %w", err)}
+		}
+		m.mainLogger.Info("Market data WebSocket connected")
 
-		// Set WebSocket message handlers
-		mdClient.SetMessageHandler(mdSubscriber.HandleEvent)
-		tradingClient.SetMessageHandler(tradingSubscriber.HandleEvent)
+		if err := tradingClientSubscriptionManager.Connect(); err != nil {
+			return connMsg{err: fmt.Errorf("Error connecting trading client: %w", err)}
+		}
+		m.mainLogger.Info("Trading WebSocket connected")
 
-		// Add strategy handlers to mdSubscriber
+		// Set message handlers
+		marketDataClient.SetMessageHandler(marketDataSubscriptionManager.HandleEvent)
+		tradingClient.SetMessageHandler(tradingClientSubscriptionManager.HandleEvent)
 
-		mdSubscriber.AddChartHandler(func(update marketdata.ChartUpdate) {
-			m.mainLogger.Debugf("DEBUG: Chart handler triggered with %d charts", len(update.Charts))
-			if m.currentStrategy != nil && m.currentStrategy.Active {
+		m.mainLogger.Info("Message Handlers Set")
 
-				for _, chart := range update.Charts {
-
-					if !m.currentStrategy.ReceivedFirstData && (len(chart.Bars) > 0 || len(chart.Ticks) > 0) {
-
-						m.currentStrategy.ReceivedFirstData = true
-
-						m.strategyLogger.Infof(">>> MARKET REACHED (Chart): Receiving data for %s <<<", m.currentStrategy.Symbol)
-
-					}
-
-					// Log every bar for the strategy
-
-					if len(chart.Bars) > 0 {
-
-						m.strategyLogger.Infof("Received %d Historical/Live Bars", len(chart.Bars))
-
-						for _, bar := range chart.Bars {
-
-							m.strategyLogger.Infof("Bar: %s | O:%.2f H:%.2f L:%.2f C:%.2f | V:%.0f",
-
-								bar.Timestamp, bar.Open, bar.High, bar.Low, bar.Close, bar.UpVolume+bar.DownVolume)
-
-						}
-
-					}
-
-					// Process bars
-
-					for _, bar := range chart.Bars {
-
-						_ = m.currentStrategy.Instance.OnTick(bar.Close)
-
-					}
-
-					// Process ticks
-
-					for _, tick := range chart.Ticks {
-
-						_ = m.currentStrategy.Instance.OnTick(tick.Price)
-
-					}
-
+		//Set up order status handlers
+		setupOrderHandlers := func() {
+			tradingClientSubscriptionManager.OnOrderUpdate = func(data json.RawMessage) {
+				var order struct {
+					ID           int     `json:"id"`
+					OrderType    string  `json:"orderType"`
+					Action       string  `json:"action"`
+					OrdStatus    string  `json:"ordStatus"` // Note: Tradovate uses "ordStatus" not "orderStatus"
+					FilledQty    int     `json:"filledQty"`
+					AvgFillPrice float64 `json:"avgFillPrice"`
+					Timestamp    string  `json:"timestamp"`
+					RejectReason string  `json:"rejectReason,omitempty"`
 				}
 
-			}
+				// if len(m.orders) == 0 {
+				// 	return "No active orders"
+				// }
+				// var sb strings.Builder
+				// sb.WriteString(fmt.Sprintf("%-8s %-10s %6s %8s %12s %10s %s\n", "ID", "Symbol", "Side", "Qty", "Price", "Status", "Time"))
+				// sb.WriteString(strings.Repeat("─", 70) + "\n")
 
-		})
+				// for _, order := range m.orders {
+				// 	sb.WriteString(fmt.Sprintf("%-8s %-10s %6s %8d %12.2f %10s %s\n",
+				// 		order.ID,
+				// 		order.Symbol,
+				// 		order.Side,
+				// 		order.Quantity,
+				// 		order.Price,
+				// 		order.Status,
+				// 		order.Time.Format("15:04:05"),
+				// 	))
+				// }
 
-		mdSubscriber.AddQuoteHandler(func(quote marketdata.Quote) {
-			m.mainLogger.Debugf("DEBUG: Quote handler triggered for contract %d", quote.ContractID)
-			if m.currentStrategy != nil && m.currentStrategy.Active {
+				// return sb.String()
 
-				if trade, ok := quote.Entries["Trade"]; ok {
-
-					if !m.currentStrategy.ReceivedFirstData {
-
-						m.currentStrategy.ReceivedFirstData = true
-
-						m.strategyLogger.Infof(">>> MARKET REACHED (Quote): Receiving data <<<")
-
-					}
-
-					_ = m.currentStrategy.Instance.OnTick(trade.Price)
-
+				if err := json.Unmarshal(data, &order); err != nil {
+					m.orderLogger.Warnf("Failed to parse order update: %v", err)
+					return
 				}
 
+				orderTime, err := time.Parse(time.RFC3339Nano, order.Timestamp)
+				if err != nil {
+					m.orderLogger.Errorf("invalid order timestamp %q: %w", order.Timestamp, err)
+				}
+
+				if orderTime.Before(sessionStart) {
+					//return
+				}
+
+				ts := orderTime.Format("03:04:05 PM")
+
+				switch order.OrdStatus {
+				case "PendingNew":
+					m.orderLogger.Infof("[%s] ORDER PENDING  | ID=%d | %s %s",
+						ts, order.ID, order.Action, order.OrderType)
+
+				case "Filled":
+					m.orderLogger.Infof("[%s] ORDER FILLED   | ID=%d | %s %s",
+						ts, order.ID, order.Action, order.OrderType)
+
+				case "Rejected":
+					m.orderLogger.Errorf("[%s] ORDER REJECTED | ID=%d | %s %s | Reason=%s",
+						ts, order.ID, order.Action, order.OrderType, order.RejectReason)
+
+				case "Working":
+					m.orderLogger.Infof("[%s] ORDER WORKING  | ID=%d | %s %s",
+						ts, order.ID, order.Action, order.OrderType)
+
+				default:
+					m.orderLogger.Printf("[%s] UNKNOWN ORDER STATUS: ID=%d | %s %s\n",
+						ts, order.ID, order.Action, order.OrderType)
+				}
+
+				// // Handle different order statuses
+				// switch order.OrdStatus {
+				// case "PendingNew":
+				// 	m.orderLogger.Infof("ORDER PENDING: ID=%d | %s %s",
+				// 		order.ID, order.Action, order.OrderType)
+
+				// case "Filled":
+				// 	m.orderLogger.Infof("ORDER FILLED: ID=%d | %s %s",
+				// 		order.ID, order.Action, order.OrderType)
+
+				// case "Rejected":
+				// 	m.orderLogger.Errorf("ORDER REJECTED: ID=%d | %s %s | Reason: %s",
+				// 		order.ID, order.Action, order.OrderType, order.RejectReason)
+
+				// case "Working":
+				// 	m.orderLogger.Infof("ORDER WORKING: ID=%d | %s %s",
+				// 		order.ID, order.Action, order.OrderType)
+
+				// case "Canceled":
+				// 	m.orderLogger.Infof("ORDER CANCELED: ID=%d", order.ID)
+
+				// case "Suspended":
+				// 	m.orderLogger.Debugf("ORDER SUSPENDED: ID=%d (part of order strategy)", order.ID)
+				// default:
+				// 	m.orderLogger.Printf("Unknown ORDER Status ?: ID=%d | %s %s\n",
+				// 		order.ID, order.Action, order.OrderType)
+				// }
+
 			}
-
-		})
-
-		// Initialize PositionManager
-
-		userID := tm.GetUserID()
-
-		// Create and start tracker reusing connections
-
-		tracker := portfolio.NewPortfolioTracker(tradingClient, mdClient, userID, m.mainLogger)
-
-		if err := tracker.Start(cfg.Tradovate.Environment); err != nil {
-
-			m.mainLogger.Errorf("Failed to start PortfolioTracker: %v", err)
 		}
 
-		// Return success with objects
+		// Set up handlers initially
+		setupOrderHandlers()
+		m.mainLogger.Info("OnOrderUpdate Set")
+
+		// NEXT STEP
+		// PUT THIS HERE AND UPDATE ORDER MGR PAGE WITH REALIZED PNL FOR SESSION AND DAILY
+		// pt.tradingSubsciptionManager.OnCashBalanceUpdate = func(data json.RawMessage) {
+		// 	pt.handleCashBalanceUpdate(data)
+		// }
+
+		userID := tm.GetUserID()
+		tracker := portfolio.NewPortfolioTracker(tradingClientSubscriptionManager, marketDataSubscriptionManager, userID, m.mainLogger)
+
+		if err := tracker.Start(cfg.Tradovate.Environment); err != nil {
+			return connMsg{err: fmt.Errorf("Failed to start PortfolioTracker: %w", err)}
+		}
+
+		m.mainLogger.Info("PortFoliotracker Started")
+
+		tm.StartTokenRefreshMonitor(func() {
+			m.mainLogger.Info("Reconnection complete after token refresh")
+		})
+
+		// var lastBar LastBar
+		// var historicalLoaded bool
+
 		return connMsgSuccess{
-			mdClient:          mdClient,
-			mdSubscriber:      mdSubscriber,
+			config:            cfg,
+			tokenManager:      tm,
+			orderManager:      om,
+			mdClient:          marketDataClient,
+			mdSubscriber:      marketDataSubscriptionManager,
 			tradingClient:     tradingClient,
-			tradingSubscriber: tradingSubscriber,
+			tradingSubscriber: tradingClientSubscriptionManager,
 			portfolioTracker:  tracker,
 		}
 	}

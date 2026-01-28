@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"tradovate-execution-engine/engine/internal/logger"
 )
 
 const (
@@ -51,31 +52,31 @@ func GetConfigPath() string {
 }
 
 // LoadOrCreateConfig loads the config file, creating a default one if it doesn't exist
-func LoadOrCreateConfig() (*Config, error) {
+func LoadOrCreateConfig(logger *logger.Logger) (*Config, error) {
 	configPath := GetConfigPath()
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		// Config doesn't exist, create default
-		fmt.Printf("Config file not found at %s. Creating default config...\n", configPath)
+		logger.Warnf("Config file not found at %s. Creating default config...", configPath)
 		if err := CreateDefaultConfig(configPath); err != nil {
-			return nil, fmt.Errorf("failed to create default config: %w", err)
+			return nil, fmt.Errorf("Failed to create default config: %w", err)
 		}
-		fmt.Printf("Default config created at %s\n", configPath)
-		fmt.Println("Please edit the config file with your credentials and restart.")
-		return nil, fmt.Errorf("default config created, please configure and restart")
+		logger.Infof("Default config created at %s", configPath)
+		logger.Info("Please edit the config file with your credentials and retry.")
+		return nil, fmt.Errorf("Default config created, please configure and retry")
 	}
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
+		return nil, fmt.Errorf("Failed to read config file: %w", err)
 	}
 
 	var config Config
 	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
+		return nil, fmt.Errorf("Failed to parse config file: %w", err)
 	}
 
-	fmt.Printf("Config loaded successfully from %s\n", configPath)
+	logger.Infof("Config loaded successfully from %s", configPath)
 	return &config, nil
 }
 

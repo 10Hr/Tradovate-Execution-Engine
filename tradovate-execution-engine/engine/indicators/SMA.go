@@ -1,5 +1,7 @@
 package indicators
 
+import "sync"
+
 // UpdateMode defines when the SMA should update
 type UpdateMode int
 
@@ -10,6 +12,7 @@ const (
 
 // SMA represents a Simple Moving Average indicator using a circular ring buffer
 type SMA struct {
+	mu         sync.RWMutex
 	period     int
 	updateMode UpdateMode
 
@@ -38,20 +41,42 @@ type DataSeriesHelper struct {
 
 // Get returns historical SMA values: [0] = current, [1] = 1 back, etc.
 func (h DataSeriesHelper) Get(index int) float64 {
-	if h.sma == nil || index < 0 || index >= h.sma.valueCount {
+	if h.sma == nil {
 		return 0
 	}
 
-	// Special case: index 0 returns the last calculated value directly
-	if index == 0 {
-		return h.sma.lastValue
+	s := h.sma
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if index < 0 || index >= s.valueCount {
+		return 0
 	}
 
-	// Calculate circular index: (currentIdx - index + totalSize) % totalSize
-	size := len(h.sma.values)
-	// Subtract 1 from valueIdx because valueIdx points to the NEXT insert position
-	targetIdx := (h.sma.valueIdx - 1 - index + size) % size
-	return h.sma.values[targetIdx]
+	if index == 0 {
+		return s.lastValue
+	}
+
+	size := len(s.values)
+	targetIdx := (s.valueIdx - 1 - index + size) % size
+	return s.values[targetIdx]
+	// if h.sma == nil || index < 0 || index >= h.sma.valueCount {
+	// 	return 0
+	// }
+	// s := h.sma
+	// s.mu.Lock()
+	// defer s.mu.Unlock()
+
+	// // Special case: index 0 returns the last calculated value directly
+	// if index == 0 {
+	// 	return h.sma.lastValue
+	// }
+
+	// // Calculate circular index: (currentIdx - index + totalSize) % totalSize
+	// size := len(h.sma.values)
+	// // Subtract 1 from valueIdx because valueIdx points to the NEXT insert position
+	// targetIdx := (h.sma.valueIdx - 1 - index + size) % size
+	// return h.sma.values[targetIdx]
 }
 
 // NewSMA creates a new SMA indicator with circular buffers
@@ -68,6 +93,8 @@ func NewSMA(period int, mode UpdateMode) *SMA {
 
 // Update adds a new price and returns the current SMA in O(1) time
 func (s *SMA) Update(price float64) float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	// 1. Update running sum (subtract oldest, add newest)
 	if s.priceCount == s.period {
 		s.runningSum -= s.prices[s.priceIdx]
@@ -100,11 +127,15 @@ func (s *SMA) Update(price float64) float64 {
 
 // CurrentValue returns the most recent SMA value
 func (s *SMA) CurrentValue() float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.lastValue
 }
 
 // Reset clears the buffers
 func (s *SMA) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.priceIdx = 0
 	s.priceCount = 0
 	s.runningSum = 0

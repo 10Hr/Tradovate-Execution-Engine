@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"time"
+	"tradovate-execution-engine/engine/UI"
 	"tradovate-execution-engine/engine/config"
 	"tradovate-execution-engine/engine/internal/auth"
 	"tradovate-execution-engine/engine/internal/execution"
@@ -13,6 +14,8 @@ import (
 	"tradovate-execution-engine/engine/internal/portfolio"
 	"tradovate-execution-engine/engine/internal/tradovate"
 	_ "tradovate-execution-engine/engine/strategies"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 const (
@@ -20,50 +23,46 @@ const (
 	configFile = "config/config.json"
 )
 
+var (
+	totalTests  int
+	failedTests int
+)
+
 func main() {
 
+	// tests.RunAllTests()
+
+	// return
+
+	p := tea.NewProgram(UI.InitialModel(), tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Printf("Error: %v\n", err)
+	}
+
+	return
+	//Pass to UI:
+
+	// return
+
+	//
+	//	PROGRAM CONTROL FLOW - USE THIS FOR WHEN
+	//
 	mainLog := logger.NewLogger(500)
 	orderLog := logger.NewLogger(500)
 
 	// Ensure config directory exists
 	_ = os.MkdirAll("../../config", 0755)
 
-	// Initialize Config for OrderManager
-	config, err := config.LoadOrCreateConfig()
+	// Initialize Config
+	config, err := config.LoadOrCreateConfig(mainLog)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 	}
 
-	// Initialize OrderManager
-	orderManager := execution.NewOrderManager(config, orderLog)
-
-	// //Pass to UI:
-	// p := tea.NewProgram(UI.InitialModel(mainLog, orderLog, orderManager), tea.WithAltScreen())
-	// if _, err := p.Run(); err != nil {
-	// 	fmt.Printf("Error: %v\n", err)
-	// }
-	// return
-
-	//
-	//	PROGRAM CONTROL FLOW - USE THIS FOR WHEN
-	//
+	//fmt.Println(config)
 
 	// Get the global token manager
-	tm := auth.GetTokenManager()
-
-	// // Set credentials
-	tm.SetCredentials(
-		config.Tradovate.AppID,
-		config.Tradovate.AppVersion,
-		config.Tradovate.Chl,
-		config.Tradovate.Cid,
-		config.Tradovate.DeviceID,
-		config.Tradovate.Environment,
-		config.Tradovate.Username,
-		config.Tradovate.Password,
-		config.Tradovate.Sec,
-		config.Tradovate.Enc,
-	)
+	tm := auth.NewTokenManager(config)
 
 	// // Authenticate
 	if err := tm.Authenticate(); err != nil {
@@ -72,133 +71,184 @@ func main() {
 	}
 	fmt.Println("Authentication Successful")
 
-	// // Now you can use the token in other parts of your code
-	accessToken, err := tm.GetAccessToken()
-	if err != nil {
-		fmt.Println("Error getting token:", err)
-		return
-	}
+	return
+	// Initialize OrderManager
+	orderManager := execution.NewOrderManager(tm, config, orderLog)
 
-	fmt.Println("\nAuth token aquired")
+	var marketDataClient *tradovate.TradovateWebSocketClient
+	var tradingClient *tradovate.TradovateWebSocketClient
+	var marketDataSubscriptionManager *tradovate.DataSubscriber
+	var tradingClientSubscriptionManager *tradovate.DataSubscriber
 
-	var mdToken string
-	mdToken, err = tm.GetMDAccessToken()
-
-	if err != nil {
-		fmt.Println("Error getting market data token:", err)
-		return
-	}
-
-	fmt.Println("\nMarket data token aquired")
-
-	marketDataClient := tradovate.NewTradovateWebSocketClient(mdToken, config.Tradovate.Environment, "md")
-	marketDataClient.SetLogger(mainLog)
-
-	// Trading Client
-	tradingClient := tradovate.NewTradovateWebSocketClient(accessToken, config.Tradovate.Environment, "")
-	tradingClient.SetLogger(mainLog)
-
-	// Subscription Managers
-	marketDataSubscriptionManager := tradovate.NewDataSubscriptionManager(marketDataClient)
-	marketDataSubscriptionManager.SetLogger(mainLog)
-
-	tradingClientSubscriptionManager := tradovate.NewDataSubscriptionManager(tradingClient)
-	tradingClientSubscriptionManager.SetLogger(mainLog)
-
-	// Connect the clients
-	if err := marketDataSubscriptionManager.Connect(); err != nil {
-		fmt.Println("Error connecting market data client:", err)
-		return
-	}
-	fmt.Println("Market data WebSocket connected")
-
-	if err := tradingClientSubscriptionManager.Connect(); err != nil {
-		fmt.Println("Error connecting trading client:", err)
-		return
-	}
-	fmt.Println("Trading WebSocket connected")
-
-	// Set Handlers
-	marketDataClient.SetMessageHandler(marketDataSubscriptionManager.HandleEvent)
-	tradingClient.SetMessageHandler(tradingClientSubscriptionManager.HandleEvent)
-
-	// Set up order status handlers
-	tradingClientSubscriptionManager.OnOrderUpdate = func(data json.RawMessage) {
-		var order struct {
-			ID           int     `json:"id"`
-			OrderType    string  `json:"orderType"`
-			Action       string  `json:"action"`
-			OrdStatus    string  `json:"ordStatus"` // Note: Tradovate uses "ordStatus" not "orderStatus"
-			FilledQty    int     `json:"filledQty"`
-			AvgFillPrice float64 `json:"avgFillPrice"`
-			Timestamp    string  `json:"timestamp"`
-			RejectReason string  `json:"rejectReason,omitempty"`
+	// Function to initialize/reinitialize clients with fresh tokens
+	initializeClients := func() error {
+		//Get fresh tokens
+		accessToken, err := tm.GetAccessToken()
+		if err != nil {
+			return fmt.Errorf("failed to get access token: %w", err)
 		}
+		fmt.Println("\nAuth token aquired")
 
-		if err := json.Unmarshal(data, &order); err != nil {
-			mainLog.Warnf("Failed to parse order update: %v", err)
-			return
+		tm.SetLogger(mainLog)
+
+		mdToken, err := tm.GetMDAccessToken()
+		if err != nil {
+			return fmt.Errorf("failed to get MD token: %w", err)
 		}
+		fmt.Println("\nMarket data token aquired")
 
-		// Tradovate order statuses: "Working", "Filled", "Rejected", "Canceled", "Suspended"
-		switch order.OrdStatus {
-		case "Filled":
-			mainLog.Infof("✅ ORDER FILLED: ID=%d | %s %s | Qty=%d | Avg Price=%.2f",
-				order.ID, order.Action, order.OrderType, order.FilledQty, order.AvgFillPrice)
+		// Create new WebSocket clients
+		marketDataClient = tradovate.NewTradovateWebSocketClient(mdToken, config.Tradovate.Environment, "md")
+		marketDataClient.SetLogger(mainLog)
 
-			// Log to order log as well
-			orderLog.Infof("FILL | Order ID: %d | %s %d @ %.2f",
-				order.ID, order.Action, order.FilledQty, order.AvgFillPrice)
+		tradingClient = tradovate.NewTradovateWebSocketClient(accessToken, config.Tradovate.Environment, "")
+		tradingClient.SetLogger(mainLog)
 
-		case "Rejected":
-			mainLog.Errorf("❌ ORDER REJECTED: ID=%d | %s %s | Reason: %s",
-				order.ID, order.Action, order.OrderType, order.RejectReason)
+		// Create subscription managers
+		marketDataSubscriptionManager = tradovate.NewDataSubscriptionManager(marketDataClient)
+		marketDataSubscriptionManager.SetLogger(mainLog)
 
-			orderLog.Errorf("REJECT | Order ID: %d | Reason: %s", order.ID, order.RejectReason)
+		tradingClientSubscriptionManager = tradovate.NewDataSubscriptionManager(tradingClient)
+		tradingClientSubscriptionManager.SetLogger(mainLog)
 
-		case "Working":
-			mainLog.Infof("📋 ORDER WORKING: ID=%d | %s %s",
-				order.ID, order.Action, order.OrderType)
+		// Connect the clients
+		if err := marketDataSubscriptionManager.Connect(); err != nil {
+			fmt.Printf("\nerror connecting market data client: %w\n", err)
+		}
+		mainLog.Info("Market data WebSocket connected")
 
-		case "Canceled":
-			mainLog.Infof("🚫 ORDER CANCELED: ID=%d", order.ID)
+		if err := tradingClientSubscriptionManager.Connect(); err != nil {
+			fmt.Printf("\nerror connecting trading client: %w\n", err)
+		}
+		fmt.Println("Trading WebSocket connected")
 
-		case "Suspended":
-			mainLog.Debugf("⏸️  ORDER SUSPENDED: ID=%d (part of order strategy)", order.ID)
+		// Set message handlers
+		marketDataClient.SetMessageHandler(marketDataSubscriptionManager.HandleEvent)
+		tradingClient.SetMessageHandler(tradingClientSubscriptionManager.HandleEvent)
+
+		fmt.Println("Message Handlers Set")
+		return nil
+	}
+
+	// Initialize clients for the first time
+	if err := initializeClients(); err != nil {
+		fmt.Printf("Failed to initialize clients: %v\n", err)
+		return
+	}
+
+	//Set up order status handlers
+	setupOrderHandlers := func() {
+		tradingClientSubscriptionManager.OnOrderUpdate = func(data json.RawMessage) {
+			var order struct {
+				ID           int     `json:"id"`
+				OrderType    string  `json:"orderType"`
+				Action       string  `json:"action"`
+				OrdStatus    string  `json:"ordStatus"` // Note: Tradovate uses "ordStatus" not "orderStatus"
+				FilledQty    int     `json:"filledQty"`
+				AvgFillPrice float64 `json:"avgFillPrice"`
+				Timestamp    string  `json:"timestamp"`
+				RejectReason string  `json:"rejectReason,omitempty"`
+			}
+
+			if err := json.Unmarshal(data, &order); err != nil {
+				mainLog.Warnf("Failed to parse order update: %v", err)
+				return
+			}
+
+			// Log all order updates for debugging
+			//mainLog.Debugf("ORDER UPDATE: %+v", order)
+			fmt.Printf("\nORDER UPDATE: %+v", order)
+
+			// Handle different order statuses
+			switch order.OrdStatus {
+			case "PendingNew":
+				mainLog.Infof("⏳ ORDER PENDING: ID=%d | %s %s",
+					order.ID, order.Action, order.OrderType)
+
+			case "Filled":
+				mainLog.Infof("✅ ORDER FILLED: ID=%d | %s %s | Qty=%d | Avg Price=%.2f",
+					order.ID, order.Action, order.OrderType, order.FilledQty, order.AvgFillPrice)
+				orderLog.Infof("FILL | Order ID: %d | %s %d @ %.2f",
+					order.ID, order.Action, order.FilledQty, order.AvgFillPrice)
+
+			case "Rejected":
+				mainLog.Errorf("❌ ORDER REJECTED: ID=%d | %s %s | Reason: %s",
+					order.ID, order.Action, order.OrderType, order.RejectReason)
+				orderLog.Errorf("REJECT | Order ID: %d | Reason: %s", order.ID, order.RejectReason)
+
+			case "Working":
+				mainLog.Infof("📋 ORDER WORKING: ID=%d | %s %s",
+					order.ID, order.Action, order.OrderType)
+
+			case "Canceled":
+				mainLog.Infof("🚫 ORDER CANCELED: ID=%d", order.ID)
+
+			case "Suspended":
+				mainLog.Debugf("⏸️  ORDER SUSPENDED: ID=%d (part of order strategy)", order.ID)
+			default:
+				fmt.Printf("\n Unknown ORDER Status ?: ID=%d | %s %s\n",
+					order.ID, order.Action, order.OrderType)
+			}
+
 		}
 	}
 
-	//Initialize PositionManager
+	// Set up handlers initially
+	setupOrderHandlers()
+	fmt.Println("OnOrderUpdate Set")
 
 	userID := tm.GetUserID()
-
-	//Create and start tracker reusing connections
-
 	tracker := portfolio.NewPortfolioTracker(tradingClientSubscriptionManager, marketDataSubscriptionManager, userID, mainLog)
 
 	if err := tracker.Start(config.Tradovate.Environment); err != nil {
 
-		fmt.Errorf("Failed to start PortfolioTracker: %v", err)
+		fmt.Printf("\nFailed to start PortfolioTracker: %v\n", err)
+		return
 	}
 
+	fmt.Println("PortFolioTracker Started")
+
+	//Start token refresh monitor with reconnection callback
+	tm.StartTokenRefreshMonitor(func() {
+		fmt.Println("\nReconnection complete after token refresh")
+		//mainLog.Info("✅ Reconnection complete after token refresh")
+	})
+
+	fmt.Println("🚀 System initialized - monitoring for positions and token expiration")
+
+	prevtoken, err := tm.GetAccessToken()
+	fmt.Println("Access token:", prevtoken)
 	fmt.Println("tdsubs: ", tradingClientSubscriptionManager.GetActiveSubscriptions())
 	fmt.Println("mdsubs: ", marketDataSubscriptionManager.GetActiveSubscriptions())
+
+	time.Sleep(1 * time.Minute)
+	tm.RenewAccessToken()
+
+	currenttoken, err := tm.GetAccessToken()
+	fmt.Println("Token test", currenttoken == prevtoken)
+	fmt.Println("tdsubs: ", tradingClientSubscriptionManager.GetActiveSubscriptions())
+	fmt.Println("mdsubs: ", marketDataSubscriptionManager.GetActiveSubscriptions())
+
+	select {}
+	return
 
 	var availableStrats []string
 	availableStrats = execution.GetAvailableStrategies()
 	fmt.Printf("Discovered %d registered strategies: %v\n", len(availableStrats), availableStrats)
 
-	strat, err := execution.CreateStrategy("ma_crossover")
+	strat, err := execution.CreateStrategy("ma_crossover", mainLog)
 
-	fmt.Println("\nStrategy", strat.GetParams())
+	fmt.Println("Strategy Created ma_crossover")
 
-	strat.SetParam("fast_length", "2")
-	strat.SetParam("slow_length", "5")
+	strat.SetParam("fast_length", "5")
+	strat.SetParam("slow_length", "15")
 
 	if err := strat.Init(orderManager); err != nil {
 		fmt.Println("Failed to initialize strategy: " + err.Error())
 		return
 	}
+
+	fmt.Println("Strategy Initialized")
 
 	params := strat.GetParams()
 
@@ -241,6 +291,8 @@ func main() {
 				if s, ok := strat.(interface{ SetEnabled(bool) }); ok {
 					s.SetEnabled(true)
 					fmt.Println("🚀 Strategy enabled for LIVE trading")
+					fmt.Println("tdsubs: ", tradingClientSubscriptionManager.GetActiveSubscriptions())
+					fmt.Println("mdsubs: ", marketDataSubscriptionManager.GetActiveSubscriptions())
 				}
 
 				historicalLoaded = true
@@ -271,7 +323,7 @@ func main() {
 						s.OnBar(bar.Timestamp, bar.Close)
 					}
 
-					// Parse and format time for display
+					//Parse and format time for display
 					// t, err := time.Parse("2006-01-02T15:04Z", bar.Timestamp)
 					// humanTime := bar.Timestamp
 					// if err == nil {
@@ -289,14 +341,14 @@ func main() {
 
 				// PRINT LIVE SMA VALUES
 
-				// fmt.Printf("📊 Current Fast SMA: %.2f | Slow SMA: %.2f\n",
-				// 	strat.GetMetrics()["Fast SMA"],
-				// 	strat.GetMetrics()["Slow SMA"])
-				// fastSMA.CurrentValue(),
-				// slowSMA.CurrentValue())
+				fmt.Printf("📊 Current Fast SMA: %.2f | Slow SMA: %.2f\n",
+					strat.GetMetrics()["Fast SMA"],
+					strat.GetMetrics()["Slow SMA"])
 			}
 		}
 	})
+
+	fmt.Println("Chart Handler Added")
 
 	// Bar aggregator - collects quotes into minute bars
 	type BarAggregator struct {
@@ -350,12 +402,12 @@ func main() {
 						s.OnBar(barAgg.currentMinute, barAgg.close)
 					}
 					livebarcounter++
-					//fmt.Println("LiveBarCount: ", livebarcounter)
+					fmt.Println("\nLiveBarCount: ", livebarcounter)
 					//fmt.Printf("   Fast SMA: %.2f | Slow SMA: %.2f\n", fastValue, slowValue)
 
-					// fmt.Printf("   Fast SMA: %.2f | Slow SMA: %.2f\n",
-					// 	strat.GetMetrics()["Fast SMA"],
-					// 	strat.GetMetrics()["Slow SMA"])
+					fmt.Printf("   Fast SMA: %.2f | Slow SMA: %.2f\n",
+						strat.GetMetrics()["Fast SMA"],
+						strat.GetMetrics()["Slow SMA"])
 				}
 
 				// Start new bar
@@ -378,6 +430,8 @@ func main() {
 		}
 	})
 
+	fmt.Println("Quote Handler added")
+
 	go func() {
 		//marketDataSubscriptionManager.Connect()
 		marketDataSubscriptionManager.SubscribeQuote(symbol)
@@ -399,19 +453,12 @@ func main() {
 			fmt.Printf("\nFailed to get chart: %v\n", err2)
 		}
 
-		// Add this heartbeat check
-		// ticker := time.NewTicker(10 * time.Second)
-		// go func() {
-		// 	for range ticker.C {
-		// 		fmt.Printf("⏰ Heartbeat: %s - WS Connected: %v EST\n",
-		// 			time.Now().Format("15:04:05"),
-		// 			mdClient.IsConnected())
-		// 	}
-		// }()
-
-		fmt.Println("tdsubs: ", tradingClientSubscriptionManager.GetActiveSubscriptions())
-		fmt.Println("mdsubs: ", marketDataSubscriptionManager.GetActiveSubscriptions())
+		//fmt.Println("tdsubs: ", tradingClientSubscriptionManager.GetActiveSubscriptions())
+		//fmt.Println("mdsubs: ", marketDataSubscriptionManager.GetActiveSubscriptions())
 	}()
+
+	fmt.Println("tdsubs: ", tradingClientSubscriptionManager.GetActiveSubscriptions())
+	fmt.Println("mdsubs: ", marketDataSubscriptionManager.GetActiveSubscriptions())
 
 	// Keep the program running
 	select {}

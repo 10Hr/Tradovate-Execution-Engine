@@ -3,6 +3,7 @@ package execution
 import (
 	"sync"
 	"tradovate-execution-engine/engine/config"
+	"tradovate-execution-engine/engine/internal/auth"
 	"tradovate-execution-engine/engine/internal/logger"
 	"tradovate-execution-engine/engine/internal/models"
 	"tradovate-execution-engine/engine/internal/portfolio"
@@ -13,6 +14,7 @@ import (
 type OrderManager struct {
 	Mu              sync.RWMutex
 	orders          map[string]*models.Order // Map of order ID to order
+	tokenManager    *auth.TokenManager
 	positionManager *portfolio.PositionManager
 	riskManager     *risk.RiskManager
 	config          *config.Config

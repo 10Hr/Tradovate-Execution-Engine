@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"tradovate-execution-engine/engine/indicators"
 	"tradovate-execution-engine/engine/internal/execution"
+	"tradovate-execution-engine/engine/internal/logger"
 	"tradovate-execution-engine/engine/internal/models"
 )
 
@@ -27,6 +28,7 @@ type MACrossover struct {
 	slowLength  int
 	mode        indicators.UpdateMode
 	orderMgr    *execution.OrderManager
+	logger      *logger.Logger
 	initialized bool
 
 	// Track last bar timestamp to avoid processing same bar multiple times
@@ -34,20 +36,8 @@ type MACrossover struct {
 	enabled          bool
 }
 
-// NewMACrossover creates a new MA crossover strategy with specified parameters
-func NewMACrossover(symbol string, fastLen, slowLen int, mode indicators.UpdateMode) *MACrossover {
-	return &MACrossover{
-		symbol:     symbol,
-		fastLength: fastLen,
-		slowLength: slowLen,
-		mode:       mode,
-		position:   Flat,
-		enabled:    false, // Default to disabled
-	}
-}
-
 // NewDefaultMACrossover creates a new MA crossover strategy with default settings
-func NewDefaultMACrossover() *MACrossover {
+func NewDefaultMACrossover(l *logger.Logger) *MACrossover {
 	return &MACrossover{
 		symbol:     "MESH6",
 		fastLength: 5,
@@ -55,6 +45,7 @@ func NewDefaultMACrossover() *MACrossover {
 		mode:       indicators.OnBarClose,
 		position:   Flat,
 		enabled:    false,
+		logger:     l,
 	}
 }
 
@@ -205,8 +196,10 @@ func (m *MACrossover) OnBar(timestamp string, price float64) error {
 		return nil
 	}
 
-	fmt.Printf("📊 Signal detected at bar %s | Fast: %.2f | Slow: %.2f | New Position: %v\n",
-		timestamp, m.fastSMA.CurrentValue(), m.slowSMA.CurrentValue(), newPosition)
+	if m.logger != nil {
+		m.logger.Infof("📊 Signal detected at bar %s | Fast: %.2f | Slow: %.2f | New Position: %v",
+			timestamp, m.fastSMA.CurrentValue(), m.slowSMA.CurrentValue(), newPosition)
+	}
 
 	return m.executePositionChange(newPosition)
 }
@@ -249,7 +242,10 @@ func (m *MACrossover) executePositionChange(newPosition Position) error {
 
 	m.position = newPosition
 
-	fmt.Println(logMsg)
+	if m.logger != nil {
+		m.logger.Info(logMsg)
+	}
+
 	_, err := m.orderMgr.SubmitMarketOrder(m.symbol, side, quantity)
 	return err
 }
@@ -345,7 +341,7 @@ func (m *MACrossover) Reset() {
 
 // Register the strategy with the registry
 func init() {
-	execution.Register("ma_crossover", func() execution.Strategy {
-		return NewDefaultMACrossover()
+	execution.Register("ma_crossover", func(l *logger.Logger) execution.Strategy {
+		return NewDefaultMACrossover(l)
 	})
 }

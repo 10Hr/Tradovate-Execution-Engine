@@ -22,7 +22,7 @@ func NewRiskManager(config *config.Config, log *logger.Logger) *RiskManager {
 }
 
 // CheckOrderRisk validates if an order passes risk checks
-func (rm *RiskManager) CheckOrderRisk(order *models.Order, currentPosition *portfolio.PositionPL, workingBuyQty, workingSellQty int) error {
+func (rm *RiskManager) CheckOrderRisk(order *models.Order, currentPosition *portfolio.PositionPL) error {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
@@ -51,16 +51,16 @@ func (rm *RiskManager) CheckOrderRisk(order *models.Order, currentPosition *port
 	// Calculate potential position based on order side
 	// We want to ensure that even if all working orders fill, we don't exceed limits
 	if order.Side == models.SideBuy {
-		// Current position + existing working buys + this new buy order
-		potentialMaxLong := currentQty + workingBuyQty + order.Quantity
+		// Current position + this new buy order
+		potentialMaxLong := currentQty + order.Quantity
 		if potentialMaxLong > rm.config.Risk.MaxContracts {
 			rm.log.Errorf("Order would exceed max contracts limit: %d (Potential Long: %d)", rm.config.Risk.MaxContracts, potentialMaxLong)
 			return fmt.Errorf("order would exceed max contracts limit of %d", rm.config.Risk.MaxContracts)
 		}
 	} else { // SideSell
-		// Current position - existing working sells - this new sell order
-		// Note: workingSellQty and order.Quantity are positive, so we subtract them
-		potentialMaxShort := currentQty - workingSellQty - order.Quantity
+		// Current position - this new sell order
+		// Note: order.Quantity are positive, so we subtract them
+		potentialMaxShort := currentQty - order.Quantity
 		if potentialMaxShort < -rm.config.Risk.MaxContracts {
 			rm.log.Errorf("Order would exceed max contracts limit: %d (Potential Short: %d)", rm.config.Risk.MaxContracts, potentialMaxShort)
 			return fmt.Errorf("order would exceed max contracts limit of %d", rm.config.Risk.MaxContracts)
@@ -69,6 +69,13 @@ func (rm *RiskManager) CheckOrderRisk(order *models.Order, currentPosition *port
 
 	rm.log.Infof("Risk check passed for order: %s %d %s", order.Side, order.Quantity, order.Symbol)
 	return nil
+}
+
+// IsDailyLossExceeded checks if the daily loss limit has been met
+func (rm *RiskManager) IsDailyLossExceeded(currentTotalPnL float64) bool {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	return currentTotalPnL <= -rm.config.Risk.DailyLossLimit
 }
 
 // UpdatePnL updates the daily PnL
