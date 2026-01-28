@@ -1,5 +1,9 @@
 package config
 
+//
+// CONFIG
+//
+
 // Config holds all configuration settings
 type Config struct {
 	Tradovate TradovateConfig `json:"tradovate"`

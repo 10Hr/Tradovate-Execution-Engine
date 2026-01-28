@@ -2,6 +2,10 @@ package marketdata
 
 import "encoding/json"
 
+//
+// MARKETDATA
+//
+
 // WebSocketSender is an interface for sending messages through WebSocket
 type WebSocketSender interface {
 	Send(url string, body interface{}) error
@@ -33,33 +37,13 @@ type ChartUpdate struct {
 type Chart struct {
 	ID        int    `json:"id"`
 	Bars      []Bar  `json:"bars,omitempty"`
-	Ticks     []Tick `json:"ticks,omitempty"`
 	Timestamp string `json:"timestamp,omitempty"`
 	EOH       bool   `json:"eoh,omitempty"`
 }
 
 type Bar struct {
-	Timestamp   string  `json:"timestamp"`
-	Open        float64 `json:"open"`
-	High        float64 `json:"high"`
-	Low         float64 `json:"low"`
-	Close       float64 `json:"close"`
-	UpVolume    float64 `json:"upVolume"`
-	DownVolume  float64 `json:"downVolume"`
-	UpTicks     int     `json:"upTicks"`
-	DownTicks   int     `json:"downTicks"`
-	BidVolume   float64 `json:"bidVolume"`
-	OfferVolume float64 `json:"offerVolume"`
-}
-
-type Tick struct {
 	Timestamp string  `json:"timestamp"`
-	Price     float64 `json:"price"`
-	Size      float64 `json:"size"`
-	BidPrice  float64 `json:"bidPrice,omitempty"`
-	AskPrice  float64 `json:"askPrice,omitempty"`
-	BidSize   float64 `json:"bidSize,omitempty"`
-	AskSize   float64 `json:"askSize,omitempty"`
+	Close     float64 `json:"close"`
 }
 
 // Historical data request parameters
@@ -70,33 +54,25 @@ type HistoricalDataParams struct {
 }
 
 type ChartDesc struct {
-	UnderlyingType  string `json:"underlyingType"` // "Tick", "DailyBar", "MinuteBar", etc.
-	ElementSize     int    `json:"elementSize,omitempty"`
+	UnderlyingType  string `json:"underlyingType"`            // "Tick", "DailyBar", "MinuteBar", etc.
+	ElementSize     int    `json:"elementSize,omitempty"`     // Type intervals ex: "1" with UnderlyingType being "MinuteBar" = 1 Minute Bars
 	ElementSizeUnit string `json:"elementSizeUnit,omitempty"` // "UnderlyingUnits", "Volume", etc.
-	WithHistogram   bool   `json:"withHistogram,omitempty"`
 }
 
 type TimeRange struct {
 	ClosestTimestamp string `json:"closestTimestamp,omitempty"`
-	ClosestTickId    int    `json:"closestTickId,omitempty"`
-	AsFarAsTimestamp string `json:"asFarAsTimestamp,omitempty"`
 	AsMuchAsElements int    `json:"asMuchAsElements,omitempty"`
 }
 
 // Event types
 const (
-	EventMarketData = "md"
-	EventChart      = "chart"
-	EventUser       = "user/syncrequest"
-	EventOrder      = "order"
-	EventPosition   = "position"
-	EventProps      = "props"
-)
-
-// Subscription types
-const (
-	SubscriptionTypeQuote = "quote"
-	SubscriptionTypeTick  = "tick"
+	EventMarketData  = "md"
+	EventChart       = "chart"
+	EventUser        = "user/syncrequest"
+	EventOrder       = "order"
+	EventPosition    = "position"
+	EventCashBalance = "cashBalance"
+	EventProps       = "props"
 )
 
 // Helper function to parse quote data from raw JSON

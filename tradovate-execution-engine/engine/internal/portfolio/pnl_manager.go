@@ -3,14 +3,14 @@ package portfolio
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"tradovate-execution-engine/engine/internal/logger"
 	"tradovate-execution-engine/engine/internal/marketdata"
+	"tradovate-execution-engine/engine/internal/models"
 	"tradovate-execution-engine/engine/internal/tradovate"
 )
 
-// NewPLTracker creates a new P&L tracker
+// NewPLTracker creates a new PnL tracker
 func NewPLTracker(log *logger.Logger) *PLTracker {
 	return &PLTracker{
 		entries: make(map[string]*PLEntry),
@@ -18,7 +18,7 @@ func NewPLTracker(log *logger.Logger) *PLTracker {
 	}
 }
 
-// Update updates or creates a P&L entry
+// Update updates or creates a PnL entry
 func (t *PLTracker) Update(name string, pl float64, netPos int, buyPrice, lastPrice float64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -39,7 +39,7 @@ func (t *PLTracker) Update(name string, pl float64, netPos int, buyPrice, lastPr
 	}
 }
 
-// GetTotal calculates total P&L across all positions
+// GetTotal calculates total PnL across all positions
 func (t *PLTracker) GetTotal() float64 {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -51,7 +51,7 @@ func (t *PLTracker) GetTotal() float64 {
 	return total
 }
 
-// GetEntries returns a copy of all P&L entries
+// GetEntries returns a copy of all PnL entries
 func (t *PLTracker) GetEntries() map[string]PLEntry {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -63,39 +63,50 @@ func (t *PLTracker) GetEntries() map[string]PLEntry {
 	return entries
 }
 
-// PrintSummary logs the current P&L summary
+// PrintSummary logs the current PnL summary
 func (t *PLTracker) PrintSummary() {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
 	if t.log != nil {
-		t.log.Info("==================== P&L SUMMARY ====================")
+		t.log.Info("==================== PnL SUMMARY ====================")
 		for name, entry := range t.entries {
 			direction := "LONG"
 			if entry.NetPos < 0 {
 				direction = "SHORT"
 			}
-			t.log.Infof("%-10s | %5s %3d | Buy: $%8.2f | Last: $%8.2f | P&L: $%9.2f",
-				name, direction, abs(entry.NetPos), entry.BuyPrice, entry.LastPrice, entry.PL)
+			t.log.Infof("%-10s | %5s %3d | Buy: $%8.2f | Last: $%8.2f | PnL: $%9.2f",
+				name, direction, models.Abs(entry.NetPos), entry.BuyPrice, entry.LastPrice, entry.PL)
 		}
 		t.log.Info("=====================================================")
-		t.log.Infof("TOTAL P&L: $%.2f", t.GetTotal())
+		t.log.Infof("TOTAL PnL: $%.2f", t.GetTotal())
 		t.log.Info("=====================================================")
 	}
 }
 
-// SetRealizedPnL sets the realized P&L
+// SetRealizedPnL sets the realized PnL
 func (t *PLTracker) SetRealizedPnL(pnl float64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if !t.hasInitialRealized {
+		t.initialRealizedPnL = pnl
+		t.hasInitialRealized = true
+	}
 	t.realizedPnL = pnl
 }
 
-// GetRealizedPnL returns the realized P&L
+// GetRealizedPnL returns the realized PnL
 func (t *PLTracker) GetRealizedPnL() float64 {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.realizedPnL
+}
+
+// GetSessionRealizedPnL returns the realized PnL since session start
+func (t *PLTracker) GetSessionRealizedPnL() float64 {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.realizedPnL - t.initialRealizedPnL
 }
 
 // NewPortfolioTracker creates a new portfolio tracker using existing clients
@@ -105,7 +116,7 @@ func NewPortfolioTracker(authClient, mdClient *tradovate.DataSubscriber, userID 
 		mdSubsciptionManager:      mdClient,
 		plTracker:                 NewPLTracker(log),
 		log:                       log,
-		positions:                 make(map[int]*Position),
+		positions:                 make(map[int]*tradovate.APIPosition),
 		contracts:                 make(map[int]string),
 		products:                  make(map[string]float64),
 		userID:                    userID,
@@ -155,7 +166,7 @@ func (pt *PortfolioTracker) Start(environment string) error {
 // handlePositionUpdate processes real-time position updates
 func (pt *PortfolioTracker) handlePositionUpdate(data json.RawMessage) {
 
-	var pos Position
+	var pos tradovate.APIPosition
 	if err := json.Unmarshal(data, &pos); err != nil {
 		pt.log.Warnf("Failed to unmarshal position update: %v", err)
 		return
@@ -169,7 +180,7 @@ func (pt *PortfolioTracker) handlePositionUpdate(data json.RawMessage) {
 	if hasContract {
 
 		if pos.NetPos != 0 {
-			pt.log.Infof("Position update for %s: NetPos=%d, Bought Price=%.2f -> Subscribing",
+			pt.log.Infof("Position update for %s: NetPos=%d, Bought Price=%.2d -> Subscribing",
 				contractName, pos.NetPos, pos.Bought)
 
 			if err := pt.mdSubsciptionManager.SubscribeQuote(contractName); err != nil {
@@ -178,7 +189,7 @@ func (pt *PortfolioTracker) handlePositionUpdate(data json.RawMessage) {
 
 			return
 		}
-		// Reset P&L in tracker for this symbol
+		// Reset PnL in tracker for this symbol
 		pt.plTracker.Update(contractName, 0, 0, 0, 0)
 
 	}
@@ -186,7 +197,7 @@ func (pt *PortfolioTracker) handlePositionUpdate(data json.RawMessage) {
 
 // handleCashBalanceUpdate processes real-time Cash Balance updates
 func (pt *PortfolioTracker) handleCashBalanceUpdate(data json.RawMessage) {
-	var cb CashBalance
+	var cb tradovate.APICashBalance
 	if err := json.Unmarshal(data, &cb); err != nil {
 		pt.log.Warnf("Failed to unmarshal cash balance: %v", err)
 		return
@@ -198,8 +209,7 @@ func (pt *PortfolioTracker) handleCashBalanceUpdate(data json.RawMessage) {
 // handleUserSync processes the initial user sync response
 func (pt *PortfolioTracker) handleUserSync(data json.RawMessage) {
 
-	pt.log.Info(data)
-	var syncResp UserSyncData
+	var syncResp tradovate.APIUserSyncData
 	if err := json.Unmarshal(data, &syncResp); err != nil {
 		pt.log.Errorf("Failed to unmarshal user sync: %v", err)
 		return
@@ -210,9 +220,8 @@ func (pt *PortfolioTracker) handleUserSync(data json.RawMessage) {
 		return
 	}
 
-	//
-	pt.log.Infof("Received sync data: %d positions, %d contracts, %d products",
-		len(syncResp.Positions), len(syncResp.Contracts), len(syncResp.Products))
+	pt.log.Infof("Received sync data: %d positions, %d contracts, %d products, %d cashbalances, %d orders",
+		len(syncResp.Positions), len(syncResp.Contracts), len(syncResp.Products), len(syncResp.CashBalances), len(syncResp.Orders))
 
 	pt.mu.Lock()
 	// Store state
@@ -225,6 +234,14 @@ func (pt *PortfolioTracker) handleUserSync(data json.RawMessage) {
 
 	// Set up the unified quote handler once
 	pt.mu.Unlock()
+
+	// Process cash balances to get initial realized PnL
+	for _, cbRaw := range syncResp.CashBalances {
+		var cb tradovate.APICashBalance
+		if err := json.Unmarshal(cbRaw, &cb); err == nil {
+			pt.plTracker.SetRealizedPnL(cb.RealizedPnL)
+		}
+	}
 
 	// Process each position
 	for _, pos := range syncResp.Positions {
@@ -244,7 +261,6 @@ func (pt *PortfolioTracker) handleUserSync(data json.RawMessage) {
 
 		if contractName != "" {
 			if pos.NetPos != 0 {
-				//pt.log.Infof
 				pt.log.Infof("Found active position: %s (ID: %d) - NetPos: %d -> Subscribing",
 					contractName, pos.ContractID, pos.NetPos)
 				// Subscribe to market data
@@ -254,7 +270,7 @@ func (pt *PortfolioTracker) handleUserSync(data json.RawMessage) {
 	}
 }
 
-// handleQuoteUpdate processes incoming quote updates and calculates P&L
+// handleQuoteUpdate processes incoming quote updates and calculates PnL
 func (pt *PortfolioTracker) handleQuoteUpdate(quote marketdata.Quote) {
 	pt.mu.Lock()
 	pos, hasPos := pt.positions[quote.ContractID]
@@ -295,19 +311,11 @@ func (pt *PortfolioTracker) handleQuoteUpdate(quote marketdata.Quote) {
 		buyPrice = pos.PrevPrice
 	}
 
-	// Calculate P&L: (current_price - buy_price) * vpp * position_size
+	// Calculate PnL: (current_price - buy_price) * vpp * position_size
 	pl := (price - buyPrice) * vpp * float64(pos.NetPos)
-
-	// if pt.log != nil {
-	// 	pt.log.Debugf("Quote update for %s: Price=%.2f, P&L=%.2f", contractName, price, pl)
-	// }
 
 	// Update tracker
 	pt.plTracker.Update(contractName, pl, pos.NetPos, buyPrice, price)
-
-	//pt.log.Info("Total PnL: ", pt.plTracker.GetTotal(), " PnL: ", pl, " ", price, " ", buyPrice, " ", vpp, " ", pos.NetPos)
-	// Log update periodically or on significant change
-	// For live UI, the plTracker.GetTotal() is what you'd watch
 }
 
 // Stop disconnects all WebSocket connections
@@ -333,64 +341,27 @@ func (pt *PortfolioTracker) Stop() error {
 	return nil
 }
 
-// GetPLSummary returns the current P&L summary
+// GetPLSummary returns the current PnL summary
 func (pt *PortfolioTracker) GetPLSummary() map[string]PLEntry {
 	return pt.plTracker.GetEntries()
 }
 
-// GetRealizedPnL returns the realized P&L from the tracker
+// GetRealizedPnL returns the realized PnL from the tracker
 func (pt *PortfolioTracker) GetRealizedPnL() float64 {
 	return pt.plTracker.GetRealizedPnL()
 }
 
-// GetTotalPL returns the total P&L
+// GetTotalPL returns the total PnL
 func (pt *PortfolioTracker) GetTotalPL() float64 {
 	return pt.plTracker.GetTotal()
 }
 
-// PrintSummary prints the current P&L summary
+// GetSessionRealizedPnL returns the realized PnL since session start
+func (pt *PortfolioTracker) GetSessionRealizedPnL() float64 {
+	return pt.plTracker.GetSessionRealizedPnL()
+}
+
+// PrintSummary prints the current PnL summary
 func (pt *PortfolioTracker) PrintSummary() {
 	pt.plTracker.PrintSummary()
-}
-
-// StartWithPeriodicSummary starts the tracker and prints summary at intervals
-func (pt *PortfolioTracker) StartWithPeriodicSummary(environment string, interval time.Duration) error {
-	if err := pt.Start(environment); err != nil {
-		return err
-	}
-
-	// Start periodic summary printing
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		for range ticker.C {
-			pt.PrintSummary()
-		}
-	}()
-	// // Start periodic summary printing
-	// go func() {
-	// 	ticker := time.NewTicker(interval)
-	// 	defer ticker.Stop()
-
-	// 	// Start periodic summary printing
-	// 	go func() {
-	// 		ticker := time.NewTicker(interval)
-	// 		defer ticker.Stop()
-
-	// 		for range ticker.C {
-	// 			pt.PrintSummary()
-	// 		}
-	// 	}()
-	// }()
-
-	return nil
-}
-
-// Helper function for absolute value
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
 }

@@ -22,7 +22,7 @@ func NewRiskManager(config *config.Config, log *logger.Logger) *RiskManager {
 }
 
 // CheckOrderRisk validates if an order passes risk checks
-func (rm *RiskManager) CheckOrderRisk(order *models.Order, currentPosition *portfolio.PositionPL) error {
+func (rm *RiskManager) CheckOrderRisk(order *models.Order, currentPosition *portfolio.PLEntry) error {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
@@ -122,12 +122,4 @@ func (rm *RiskManager) resetDailyPnL() {
 	rm.tradeCount = 0
 	rm.dailyPnLReset = time.Now()
 	rm.log.Info("Daily PnL and trade count reset")
-}
-
-// abs returns absolute value
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
 }

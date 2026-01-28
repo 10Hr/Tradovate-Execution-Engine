@@ -43,18 +43,6 @@ type Order struct {
 	Price        float64     // Order price (0 for market orders)
 	Status       OrderStatus // Current order status
 	SubmittedAt  time.Time   // When order was submitted
-	FilledAt     time.Time   // When order was filled
-	FilledPrice  float64     // Actual fill price
-	FilledQty    int         // Actual filled quantity
 	RejectReason string      // Reason for rejection if applicable
 	ExternalID   string      // External order ID from broker
-	RetryCount   int         // Number of times this order has been retried
-}
-
-// Fill represents an order fill event
-type Fill struct {
-	OrderID   string
-	Price     float64
-	Quantity  int
-	Timestamp time.Time
 }

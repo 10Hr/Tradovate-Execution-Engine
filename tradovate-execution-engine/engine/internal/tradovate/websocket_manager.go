@@ -12,7 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// // NewTradovateWebSocketClient creates a new WebSocket client
+// NewTradovateWebSocketClient creates a new WebSocket client
 func NewTradovateWebSocketClient(accessToken, environment, wsType string) *TradovateWebSocketClient {
 	// Market data uses separate endpoints: md-demo and md-live
 
@@ -89,7 +89,7 @@ func (c *TradovateWebSocketClient) authorize() error {
 	authMsg := fmt.Sprintf("authorize\n1\n\n%s", c.accessToken)
 
 	if c.log != nil {
-		/*c.log.Info*/ c.log.Info("Sending authorization...")
+		c.log.Info("Sending authorization...")
 	}
 
 	c.mu.Lock()
@@ -118,7 +118,7 @@ func (c *TradovateWebSocketClient) authorize() error {
 			if c.isAuthorized {
 				c.mu.RUnlock()
 				if c.log != nil {
-					/*c.log.Info*/ c.log.Info("WebSocket authorized")
+					c.log.Info("WebSocket authorized")
 				}
 				return nil
 			}
@@ -152,10 +152,6 @@ func (c *TradovateWebSocketClient) Send(url string, body interface{}) error {
 	requestID := atomic.AddUint32(&c.nextRequestID, 1)
 	c.pendingRequests[requestID] = url
 	message := fmt.Sprintf("%s\n%d\n\n%s", url, requestID, jsonBody)
-
-	// if c.log != nil {
-	// 	/*c.log.Infof*/ c.log.Infof("Sending message (ID %d): %s", requestID, url)
-	// }
 
 	return c.conn.WriteMessage(websocket.TextMessage, []byte(message))
 }
@@ -200,15 +196,13 @@ func (c *TradovateWebSocketClient) handleMessages() {
 			c.mu.Unlock()
 
 			if c.log != nil {
-				/*c.log.Info*/ c.log.Info("WebSocket session opened")
+				c.log.Info("WebSocket session opened")
 			}
 
 		case 'h':
 			// Heartbeat frame - we send our own proactive heartbeats every 2.5s
 			// so we can just ignore the server's 'h' frame or log it.
-			if c.log != nil {
-				//c.log.Debug("Received heartbeat frame from server")
-			}
+			// Handled by proactive heartbeat
 
 		case 'a':
 			// Array frame - contains JSON data
@@ -217,7 +211,7 @@ func (c *TradovateWebSocketClient) handleMessages() {
 		case 'c':
 			// Close frame
 			if c.log != nil {
-				/*c.log.Infof*/ c.log.Infof("Server closing connection: %s", string(payload))
+				c.log.Infof("Server closing connection: %s", string(payload))
 			}
 			return
 
@@ -235,25 +229,16 @@ func (c *TradovateWebSocketClient) sendHeartbeat() {
 	defer c.mu.Unlock()
 
 	if c.conn != nil {
-		if c.log != nil {
-			//c.log.Debug("Sending heartbeat response []")
-		}
 		c.conn.WriteMessage(websocket.TextMessage, []byte("[]"))
 	}
 }
 
 // handleArrayFrame processes array frames containing JSON messages
 func (c *TradovateWebSocketClient) handleArrayFrame(payload []byte) {
-
-	//fmt.Printf("\n📨 RAW RESPONSE: %s\n", string(payload))
-
-	// if c.log != nil {
-	// 	c.log.Debugf("DEBUG: Received array frame: %s", string(payload))
-	// }
 	var messages []json.RawMessage
 	if err := json.Unmarshal(payload, &messages); err != nil {
 		if c.log != nil {
-			/*c.log.Errorf*/ c.log.Errorf("Error unmarshaling array frame: %v, payload: %s", err, string(payload))
+			c.log.Errorf("Error unmarshaling array frame: %v, payload: %s", err, string(payload))
 		}
 		return
 	}
@@ -263,7 +248,7 @@ func (c *TradovateWebSocketClient) handleArrayFrame(payload []byte) {
 		var response WSResponse
 		if err := json.Unmarshal(msg, &response); err != nil {
 			if c.log != nil {
-				/*c.log.Errorf*/ c.log.Errorf("Error unmarshaling message: %v", err)
+				c.log.Errorf("Error unmarshaling message: %v", err)
 			}
 			continue
 		}
@@ -282,7 +267,7 @@ func (c *TradovateWebSocketClient) handleArrayFrame(payload []byte) {
 		// Log any errors
 		if response.Status != 0 && response.Status != 200 {
 			if c.log != nil {
-				/*c.log.Errorf*/ c.log.Errorf("Error response: Status %d - %s", response.Status, response.StatusText)
+				c.log.Errorf("Error response: Status %d - %s", response.Status, response.StatusText)
 			}
 		}
 
@@ -318,11 +303,11 @@ func (c *TradovateWebSocketClient) handleArrayFrame(payload []byte) {
 func (c *TradovateWebSocketClient) handleResponse(response WSResponse) {
 	if response.Status == 200 {
 		if c.log != nil {
-			/*c.log.Infof*/ c.log.Infof("Request %d successful", response.ID)
+			c.log.Infof("Request %d successful", response.ID)
 		}
 	} else {
 		if c.log != nil {
-			/*c.log.Errorf*/ c.log.Errorf("Request %d failed: Status %d - %s", response.ID, response.Status, response.StatusText)
+			c.log.Errorf("Request %d failed: Status %d - %s", response.ID, response.Status, response.StatusText)
 		}
 	}
 }

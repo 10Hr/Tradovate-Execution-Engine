@@ -3,6 +3,7 @@ package tradovate
 import (
 	"encoding/json"
 	"sync"
+	"time"
 	"tradovate-execution-engine/engine/internal/logger"
 	"tradovate-execution-engine/engine/internal/marketdata"
 
@@ -63,25 +64,60 @@ type WSResponse struct {
 	StatusText string          `json:"statusText,omitempty"`
 }
 
-// APIPosition represents the Tradovate position response
+// APIPosition represents a Tradovate position
 type APIPosition struct {
-	ID          int     `json:"id"`
-	ContractID  int     `json:"contractId"`
-	NetPos      int     `json:"netPos"`
-	NetPrice    float64 `json:"netPrice"`
-	BoughtValue float64 `json:"boughtValue"`
-	SoldValue   float64 `json:"soldValue"`
+	ContractID int     `json:"contractId"`
+	NetPos     int     `json:"netPos"`
+	Bought     int     `json:"bought"`
+	NetPrice   float64 `json:"netPrice"`
+	PrevPrice  float64 `json:"prevPrice"`
 }
 
-// APIOrderEvent represents the Tradovate order event
-type APIOrderEvent struct {
-	ID           int     `json:"id"`
-	OrderID      int     `json:"orderId"`
-	ContractID   int     `json:"contractId"`
-	Action       string  `json:"action"`    // Buy, Sell
-	OrdStatus    string  `json:"ordStatus"` // Pending, Working, Filled, Cancelled, Rejected
-	FilledQty    int     `json:"cumQty"`    // Cumulative filled quantity
-	AvgFillPrice float64 `json:"avgPrice"`
-	RejectReason string  `json:"rejectReason"`
-	Text         string  `json:"text"`
+// APIContract represents a Tradovate contract
+type APIContract struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+type APITradeDate struct {
+	Year  int `json:"year"`
+	Month int `json:"month"`
+	Day   int `json:"day"`
+}
+
+type APICashBalance struct {
+	RealizedPnL float64 `json:"realizedPnL"`
+}
+
+// APIProduct represents a Tradovate product
+type APIProduct struct {
+	Name          string  `json:"name"`
+	ValuePerPoint float64 `json:"valuePerPoint"`
+}
+
+// APIUserSyncData represents the initial user sync response
+type APIUserSyncData struct {
+	Users []struct {
+		ID int `json:"id"`
+	} `json:"users,omitempty"`
+	Positions    []APIPosition     `json:"positions,omitempty"`
+	Contracts    []APIContract     `json:"contracts,omitempty"`
+	Products     []APIProduct      `json:"products,omitempty"`
+	CashBalances []json.RawMessage `json:"cashBalances"`
+	Orders       []json.RawMessage `json:"orders"`
+}
+
+// APIAuthResponse represents the Tradovate authentication response
+type APIAuthResponse struct {
+	AccessToken    string    `json:"accessToken"`
+	ExpirationTime time.Time `json:"expirationTime"`
+	MDAccessToken  string    `json:"mdAccessToken"`
+	UserID         int       `json:"userId"`
+	Name           string    `json:"name"`
+}
+
+// APIAccount represents a Tradovate account
+type APIAccount struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
 }

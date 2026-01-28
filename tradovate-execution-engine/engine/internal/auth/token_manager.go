@@ -11,6 +11,7 @@ import (
 
 	"tradovate-execution-engine/engine/config"
 	"tradovate-execution-engine/engine/internal/logger"
+	"tradovate-execution-engine/engine/internal/tradovate"
 )
 
 var (
@@ -112,19 +113,16 @@ func (tm *TokenManager) Authenticate() error {
 	// Read response
 	respBody, err := io.ReadAll(resp.Body)
 
-	tm.log.Info("RAW RESPONSE:", string(respBody))
 	if err != nil {
 		return fmt.Errorf("Error reading response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-
 		return parseAuthError(resp.StatusCode, respBody)
-		//return fmt.Errorf("Authentication failed with status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	// Parse response
-	var authResp AuthResponse
+	var authResp tradovate.APIAuthResponse
 	if err := json.Unmarshal(respBody, &authResp); err != nil {
 		return fmt.Errorf("Error parsing response: %w", err)
 	}
@@ -138,19 +136,10 @@ func (tm *TokenManager) Authenticate() error {
 	tm.username = authResp.Name
 	tm.mu.Unlock()
 
-	// At the end of Authenticate()
-	// tm.mu.RLock()
-	// accessToken := tm.accessToken
-	// tm.mu.RUnlock()
-
-	// if accessToken == "" {
-	// 	return fmt.Errorf("Config not configured properly, please ensure all fields are correct%w", tm)
-	// }
-
 	return nil
 }
 
-// ✅ ADD THIS: Parse HTTP errors from Tradovate
+// parseAuthError parses HTTP errors from Tradovate
 func parseAuthError(statusCode int, body []byte) error {
 	switch statusCode {
 	case 400:
@@ -254,7 +243,7 @@ func (tm *TokenManager) GetAccountID() (int, error) {
 		return 0, fmt.Errorf("failed to list accounts: %s", string(body))
 	}
 
-	var accounts []Account
+	var accounts []tradovate.APIAccount
 	if err := json.NewDecoder(resp.Body).Decode(&accounts); err != nil {
 		return 0, fmt.Errorf("failed to decode account list: %w", err)
 	}
@@ -275,7 +264,7 @@ func (tm *TokenManager) GetAccountID() (int, error) {
 	return accounts[0].ID, nil
 }
 
-// IsAuthenticated checks if there's a valid token
+// IsAuthenticated checks if there's a valid access token
 func (tm *TokenManager) IsAuthenticated() bool {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
@@ -355,7 +344,7 @@ func (tm *TokenManager) RenewAccessToken() error {
 	}
 
 	// Parse response (same structure as auth response)
-	var renewResp AuthResponse
+	var renewResp tradovate.APIAuthResponse
 	if err := json.Unmarshal(respBody, &renewResp); err != nil {
 		return fmt.Errorf("Error parsing renewal response: %w", err)
 	}
@@ -363,18 +352,13 @@ func (tm *TokenManager) RenewAccessToken() error {
 	// Update tokens in memory (WebSockets stay connected!)
 	tm.mu.Lock()
 	tm.accessToken = renewResp.AccessToken
-	// Note: renewAccessToken doesn't return mdAccessToken, only updates the main token
-	// The MD token from original auth continues to work
 	tm.expirationTime = renewResp.ExpirationTime
 	tm.mu.Unlock()
 
 	// Log success
 	tm.mu.RLock()
 	if tm.log != nil {
-		tm.log.Info("✅ Token renewed successfully (session maintained)")
-		tm.log.Infof("New expiration: %s", renewResp.ExpirationTime.Format("January 2, 2006 at 3:04 PM EST"))
-		//tm.log.Info("✅ Token renewed successfully (session maintained)")
-		//tm.log.Infof("New expiration: %s", renewResp.ExpirationTime.Format("January 2, 2006 at 3:04 PM EST"))
+		tm.log.Info("Token renewed successfully")
 	}
 	tm.mu.RUnlock()
 
@@ -406,10 +390,6 @@ func (tm *TokenManager) StartTokenRefreshMonitor(refreshCallback func()) {
 				refreshTime = 1 * time.Second
 			}
 
-			if tm.log != nil {
-				// tm.log.Infof("Token refresh scheduled in %v (expires at %v)",
-				// 	refreshTime, tm.expirationTime.Format("3:04 PM"))
-			}
 			tm.log.Infof("Token refresh scheduled in %v (expires at %v)",
 				refreshTime, tm.expirationTime.Format("3:04 PM"))
 
@@ -423,15 +403,14 @@ func (tm *TokenManager) StartTokenRefreshMonitor(refreshCallback func()) {
 			}
 
 			if tm.log != nil {
-				tm.log.Info("🔄 Refreshing access tokens...")
+				tm.log.Info("Refreshing access tokens...")
 			}
 
-			//Renew access token without
 			if err := tm.RenewAccessToken(); err != nil {
 				tm.log.Errorf("Failed to renew access token: %v", err)
 			} else {
 				if tm.log != nil {
-					tm.log.Info("✅ Tokens refreshed successfully")
+					tm.log.Info("Tokens refreshed successfully")
 				}
 
 				// Call the callback to notify that tokens have been refreshed
@@ -451,18 +430,4 @@ func (tm *TokenManager) StopTokenRefreshMonitor() {
 		close(tm.monitorStopChan)
 		tm.monitorStopChan = nil
 	}
-}
-
-// GetTimeUntilExpiration returns how long until the token expires
-func (tm *TokenManager) GetTimeUntilExpiration() time.Duration {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-	return time.Until(tm.expirationTime)
-}
-
-// WillExpireSoon returns true if token expires in less than the given duration
-func (tm *TokenManager) WillExpireSoon(threshold time.Duration) bool {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-	return time.Until(tm.expirationTime) < threshold
 }

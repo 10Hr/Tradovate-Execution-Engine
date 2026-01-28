@@ -146,7 +146,7 @@ func (s *DataSubscriber) HandleEvent(eventType string, data json.RawMessage) {
 	case marketdata.EventProps:
 		s.handlePropsEvent(data)
 	case "md/subscribequote", "md/unsubscribequote":
-		s.handleSubscriptionResponse(eventType, data)
+		s.handleSubscriptionResponse(eventType)
 	default:
 		if s.log != nil {
 			s.log.Infof("Unknown event type: %s", eventType)
@@ -155,7 +155,7 @@ func (s *DataSubscriber) HandleEvent(eventType string, data json.RawMessage) {
 }
 
 // handleSubscriptionResponse processes subscription confirmations
-func (s *DataSubscriber) handleSubscriptionResponse(eventType string, data json.RawMessage) {
+func (s *DataSubscriber) handleSubscriptionResponse(eventType string) {
 	if s.log != nil {
 		s.log.Infof("Confirmation received for: %s", eventType)
 	}
@@ -193,9 +193,13 @@ func (s *DataSubscriber) handlePropsEvent(data json.RawMessage) {
 		if s.OnOrderUpdate != nil {
 			s.OnOrderUpdate(props.Entity)
 		}
-	case "position":
+	case marketdata.EventPosition:
 		if s.OnPositionUpdate != nil {
 			s.OnPositionUpdate(props.Entity)
+		}
+	case marketdata.EventCashBalance:
+		if s.OnCashBalanceUpdate != nil {
+			s.OnCashBalanceUpdate(props.Entity)
 		}
 	}
 }
@@ -203,12 +207,7 @@ func (s *DataSubscriber) handlePropsEvent(data json.RawMessage) {
 // handleUserEvent processes user sync events
 func (s *DataSubscriber) handleUserEvent(data json.RawMessage) {
 
-	var syncData struct {
-		CashBalances []json.RawMessage `json:"cashBalances"`
-		Orders       []json.RawMessage `json:"orders"`
-		Positions    []json.RawMessage `json:"positions"`
-		FillPairs    []json.RawMessage `json:"fillPairs"`
-	}
+	var syncData APIUserSyncData
 
 	if err := json.Unmarshal(data, &syncData); err == nil {
 		if s.OnOrderUpdate != nil {
@@ -218,7 +217,8 @@ func (s *DataSubscriber) handleUserEvent(data json.RawMessage) {
 		}
 		if s.OnPositionUpdate != nil {
 			for _, pos := range syncData.Positions {
-				s.OnPositionUpdate(pos)
+				posJSON, _ := json.Marshal(pos)
+				s.OnPositionUpdate(posJSON)
 			}
 		}
 		if s.OnCashBalanceUpdate != nil {
@@ -276,9 +276,6 @@ func (s *DataSubscriber) handleChartData(data json.RawMessage) {
 	}
 
 	for _, chart := range chartUpdate.Charts {
-		if len(chart.Ticks) > 0 && s.log != nil {
-			s.log.Infof("Tick data received - Chart ID: %d, Ticks: %d", chart.ID, len(chart.Ticks))
-		}
 		if len(chart.Bars) > 0 && s.log != nil {
 			s.log.Infof("Bar data received - Chart ID: %d, Bars: %d", chart.ID, len(chart.Bars))
 		}
@@ -303,10 +300,6 @@ func (s *DataSubscriber) SubscribeQuote(symbol interface{}) error {
 	// Check if already subscribed
 	_, exists := s.isSubscribed(endpoint, params)
 	if exists {
-		s.addSubscription(endpoint, params, 0)
-		if s.log != nil {
-			s.log.Infof("Already subscribed to %s for %v, incremented ref count", endpoint, symbol)
-		}
 		return nil
 	}
 
@@ -369,8 +362,6 @@ func (s *DataSubscriber) GetChart(params marketdata.HistoricalDataParams) error 
 		return err
 	}
 
-	s.log.Infof("Requested chart data for %v", params.Symbol)
-
 	if s.log != nil {
 		s.log.Infof("Requested chart data for %v", params.Symbol)
 	}
@@ -387,10 +378,6 @@ func (s *DataSubscriber) SubscribeUserSyncRequests(users []int) error {
 	// Check if already subscribed
 	_, exists := s.isSubscribed(endpoint, params)
 	if exists {
-		s.addSubscription(endpoint, params, 0)
-		if s.log != nil {
-			s.log.Info("Already subscribed to user sync, incremented ref count")
-		}
 		return nil
 	}
 

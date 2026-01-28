@@ -2,39 +2,8 @@ package execution
 
 import (
 	"fmt"
-	"sync"
 	"tradovate-execution-engine/engine/internal/logger"
 )
-
-// StrategyParam represents a single configuration parameter for a strategy
-type StrategyParam struct {
-	Name        string
-	Type        string // "int", "float", "string"
-	Value       string
-	Description string
-}
-
-// Strategy interface defines the required metohds for any trading strategy
-type Strategy interface {
-	Name() string
-	Description() string
-	GetParams() []StrategyParam
-	SetParam(name, value string) error
-	Init(om *OrderManager) error
-	OnTick(price float64) error
-	GetMetrics() map[string]float64
-	Reset()
-}
-
-// StrategyRegistry maintains a list of avaialble strategies
-type StrategyRegistry struct {
-	mu         sync.RWMutex
-	strategies map[string]func(*logger.Logger) Strategy
-}
-
-var globalRegistry = &StrategyRegistry{
-	strategies: make(map[string]func(*logger.Logger) Strategy),
-}
 
 // Register adds a strategy to the global registry
 func Register(name string, factory func(*logger.Logger) Strategy) {

@@ -29,7 +29,6 @@ func GetHTTPBaseURL(environment string) string {
 
 // GetWSBaseURL returns the Market Data WebSocket API base URL for the given environment
 func GetMDWSBaseURL(environment string) string {
-
 	if environment == "live" {
 		return mdLiveWSUrl
 	}
@@ -38,7 +37,6 @@ func GetMDWSBaseURL(environment string) string {
 
 // GetWSBaseURL returns the WebSocket API base URL for the given environment
 func GetWSBaseURL(environment string) string {
-
 	if environment == "live" {
 		return baseLiveWSUrl
 	}
@@ -150,29 +148,4 @@ func CreateDefaultConfig(path string) error {
 	}
 
 	return SaveConfig(path, defaultConfig)
-}
-
-// CreateDefaultConfig overload
-func CreateConfigFromParams(appId, appVersion, chl, cid, deviceId, env, user, pass, sec string, enc bool, maxContracts, maxOrderRetries int, dailyLossLimit float64, enableRiskCheck bool) error {
-	defaultConfig := &Config{
-		Tradovate: TradovateConfig{
-			AppID:       appId,
-			AppVersion:  appVersion,
-			Chl:         chl,
-			Cid:         cid,
-			DeviceID:    deviceId,
-			Environment: env,
-			Username:    user,
-			Password:    pass,
-			Sec:         sec,
-			Enc:         enc,
-		},
-		Risk: RiskConfig{
-			MaxContracts:     maxContracts,
-			DailyLossLimit:   dailyLossLimit,
-			EnableRiskChecks: enableRiskCheck,
-		},
-	}
-
-	return SaveConfig("config", defaultConfig)
 }

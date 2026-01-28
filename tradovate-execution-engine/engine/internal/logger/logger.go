@@ -2,12 +2,8 @@ package logger
 
 import (
 	"fmt"
-	"sync"
 	"time"
 )
-
-// LogLevel represents the severity of a log entry
-type LogLevel string
 
 const (
 	LevelInfo  LogLevel = "INFO"
@@ -15,20 +11,6 @@ const (
 	LevelError LogLevel = "ERROR"
 	LevelDebug LogLevel = "DEBUG"
 )
-
-// LogEntry represents a single log entry
-type LogEntry struct {
-	Timestamp time.Time
-	Level     LogLevel
-	Message   string
-}
-
-// Logger handles all logging throughout the application
-type Logger struct {
-	mu      sync.RWMutex
-	entries []LogEntry
-	maxSize int
-}
 
 // NewLogger creates a new logger with the specified maximum size
 func NewLogger(maxSize int) *Logger {
@@ -122,34 +104,6 @@ func (l *Logger) GetEntries() []LogEntry {
 	entries := make([]LogEntry, len(l.entries))
 	copy(entries, l.entries)
 	return entries
-}
-
-// GetEntriesSince returns entries since the given time
-func (l *Logger) GetEntriesSince(since time.Time) []LogEntry {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-
-	filtered := []LogEntry{}
-	for _, entry := range l.entries {
-		if entry.Timestamp.After(since) {
-			filtered = append(filtered, entry)
-		}
-	}
-	return filtered
-}
-
-// GetEntriesByLevel returns entries matching the specified level
-func (l *Logger) GetEntriesByLevel(level LogLevel) []LogEntry {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-
-	filtered := []LogEntry{}
-	for _, entry := range l.entries {
-		if entry.Level == level {
-			filtered = append(filtered, entry)
-		}
-	}
-	return filtered
 }
 
 // Clear removes all log entries

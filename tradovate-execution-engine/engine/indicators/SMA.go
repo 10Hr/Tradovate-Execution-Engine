@@ -59,24 +59,8 @@ func (h DataSeriesHelper) Get(index int) float64 {
 
 	size := len(s.values)
 	targetIdx := (s.valueIdx - 1 - index + size) % size
+
 	return s.values[targetIdx]
-	// if h.sma == nil || index < 0 || index >= h.sma.valueCount {
-	// 	return 0
-	// }
-	// s := h.sma
-	// s.mu.Lock()
-	// defer s.mu.Unlock()
-
-	// // Special case: index 0 returns the last calculated value directly
-	// if index == 0 {
-	// 	return h.sma.lastValue
-	// }
-
-	// // Calculate circular index: (currentIdx - index + totalSize) % totalSize
-	// size := len(h.sma.values)
-	// // Subtract 1 from valueIdx because valueIdx points to the NEXT insert position
-	// targetIdx := (h.sma.valueIdx - 1 - index + size) % size
-	// return h.sma.values[targetIdx]
 }
 
 // NewSMA creates a new SMA indicator with circular buffers

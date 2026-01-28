@@ -36,6 +36,18 @@ type MACrossover struct {
 	enabled          bool
 }
 
+// NewDefaultMACrossover creates a new MA crossover strategy used for testing
+func NewMACrossover(symbol string, fast, slow int, mode indicators.UpdateMode) *MACrossover {
+	return &MACrossover{
+		symbol:     symbol,
+		fastLength: fast,
+		slowLength: slow,
+		mode:       mode,
+		position:   Flat,
+		enabled:    false,
+	}
+}
+
 // NewDefaultMACrossover creates a new MA crossover strategy with default settings
 func NewDefaultMACrossover(l *logger.Logger) *MACrossover {
 	return &MACrossover{
@@ -152,28 +164,6 @@ func (m *MACrossover) Init(om *execution.OrderManager) error {
 	return nil
 }
 
-// OnTick processes a new price tick (for OnEachTick mode with quotes)
-func (m *MACrossover) OnTick(price float64) error {
-	if !m.initialized {
-		return fmt.Errorf("strategy not initialized")
-	}
-
-	// Only update and check signals if in OnEachTick mode
-	if m.mode != indicators.OnEachTick {
-		return nil
-	}
-
-	m.fastSMA.Update(price)
-	m.slowSMA.Update(price)
-
-	newPosition, changed := m.checkSignal(1)
-	if !changed {
-		return nil
-	}
-
-	return m.executePositionChange(newPosition)
-}
-
 // OnBar processes a completed bar (for OnBarClose mode)
 func (m *MACrossover) OnBar(timestamp string, price float64) error {
 	if !m.initialized {
@@ -208,7 +198,9 @@ func (m *MACrossover) OnBar(timestamp string, price float64) error {
 func (m *MACrossover) executePositionChange(newPosition Position) error {
 
 	if !m.enabled {
-		fmt.Println("[Disabled] ")
+		if m.logger != nil {
+			m.logger.Info("[Disabled] ")
+		}
 		return nil
 	}
 	var side models.OrderSide
