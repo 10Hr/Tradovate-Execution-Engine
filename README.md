@@ -59,8 +59,7 @@ Create an account at [MyFundedFutures](https://myfundedfutures.com) to obtain yo
 
 **For detailed step-by-step instructions on extracting Tradovate API credentials, see:**
 
-📁 **[Tradovate Credential Extraction Guide]**  
-*(https://docs.google.com/document/d/16pkRcAYS2NYf8K-AFAIOAEIwCmt5l2MzJlOkV66RcIs/edit?usp=sharing)*
+📁 **[Tradovate Credential Extraction Guide](https://docs.google.com/document/d/16pkRcAYS2NYf8K-AFAIOAEIwCmt5l2MzJlOkV66RcIs/edit?usp=sharing)**  
 
 This guide provides instructions for obtaining:
 - `appId`
