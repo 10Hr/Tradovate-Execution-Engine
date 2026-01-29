@@ -53,6 +53,9 @@ This creates an executable named trading-engine.exe.
 Execute the application:
 
 ```bash
+Windows
+trading-engine.exe
+Linux
 ./trading-engine.exe
 ```
 
@@ -297,7 +300,10 @@ Tradovate-Execution-Engine/
 ### Normal Execution
 
 ```bash
-./trading-engine
+Windows
+trading-engine.exe
+Linux
+./trading-engine.exe
 ```
 ```
 
