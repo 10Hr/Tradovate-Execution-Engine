@@ -156,7 +156,7 @@ From `config/types.go` lines 14-25, the configuration supports two environments:
 
 **Method 1: Built-in Editor**
 
-*Note*: You can not use Ctrl cmds insude the editor Ex: `Ctrl + C`. 
+*Note*: You can not use Ctrl cmds inside the built-in editor Ex: `Ctrl + C`. 
 
 1. Launch the application
 2. Press `Shift + 4` (the `$` key) OR type `:config` and press Enter
