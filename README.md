@@ -135,6 +135,7 @@ Example:
 :strategy ma_crossover
 :set symbol MESH6
 :start
+:q
 ```
 
 Press `Enter` to execute. Press `Esc` to cancel.
@@ -152,7 +153,7 @@ Press `Enter` to execute. Press `Esc` to cancel.
 | `:` | Enter command mode |
 | `Esc` | Exit editor/command mode |
 | `Ctrl + S` | Save in editor |
-| `Ctrl + C` | Quit application |
+| `q` | Quit application |
 | `w` | Scroll up log |
 | `s` | Scroll down log |
 | `Shift + w` (`W`) | Go to top of log |
@@ -209,12 +210,6 @@ You MUST use the current front-month contract symbol:
 **Incorrect:** `ES`, `NQ`, `MES` (generic symbols)  
 **Correct:** `MESH6`, `NQH6`, `ESH6` (specific contract month/year)
 
-To find valid symbols:
-1. Log into Tradovate Trader
-2. Search for your product (e.g., Micro E-mini S&P 500)
-3. Note the full contract symbol
-4. Use the front month (current or next expiring contract)
-
 ### Starting and Stopping
 
 **Start Strategy:**
@@ -239,6 +234,10 @@ Status shown in Strategy tab:
 **Entry Signals:**
 - **Long**: Fast SMA crosses above Slow SMA
 - **Short**: Fast SMA crosses below Slow SMA
+
+**Exit Signals:**
+- **Long** - Flatten on opposite signal
+- **Short** - Flatten on opposite signal
 
 **Position Sizing:**
 - Fixed at 1 contract per trade
@@ -535,7 +534,7 @@ Futures markets trade nearly 24/5:
 
 **Repository:** https://github.com/10Hr/Tradovate-Execution-Engine  
 **Author:** Tyler (10Hr)  
-**Language:** Go 1.25.5  
+**Language:** Go 1.25.6  
 **License:** See repository
 
 ---
