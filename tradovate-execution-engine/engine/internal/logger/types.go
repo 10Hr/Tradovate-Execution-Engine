@@ -21,7 +21,15 @@ type LogEntry struct {
 
 // Logger handles all logging throughout the application
 type Logger struct {
-	mu      sync.RWMutex
-	entries []LogEntry
-	maxSize int
+	mu       sync.RWMutex
+	entries  []LogEntry
+	maxSize  int
+	minLevel LogLevel
+}
+
+var levelPriority = map[LogLevel]int{
+	LevelDebug: 0,
+	LevelInfo:  1,
+	LevelWarn:  2,
+	LevelError: 3,
 }

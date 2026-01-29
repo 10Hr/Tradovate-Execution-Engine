@@ -48,7 +48,7 @@ func (c *TradovateWebSocketClient) SetMessageHandler(handler MessageHandler) {
 // Connect establishes WebSocket connection and authorizes
 func (c *TradovateWebSocketClient) Connect() error {
 	if c.log != nil {
-		c.log.Infof("Connecting to WebSocket: %s", c.wsURL)
+		c.log.Debugf("Connecting to WebSocket: %s", c.wsURL)
 	}
 
 	var err error
@@ -58,7 +58,7 @@ func (c *TradovateWebSocketClient) Connect() error {
 	}
 
 	if c.log != nil {
-		c.log.Info("WebSocket connected")
+		c.log.Debug("WebSocket connected")
 	}
 
 	// Start message handler
@@ -89,7 +89,7 @@ func (c *TradovateWebSocketClient) authorize() error {
 	authMsg := fmt.Sprintf("authorize\n1\n\n%s", c.accessToken)
 
 	if c.log != nil {
-		c.log.Info("Sending authorization...")
+		c.log.Debug("Sending authorization...")
 	}
 
 	c.mu.Lock()
@@ -118,7 +118,7 @@ func (c *TradovateWebSocketClient) authorize() error {
 			if c.isAuthorized {
 				c.mu.RUnlock()
 				if c.log != nil {
-					c.log.Info("WebSocket authorized")
+					c.log.Debug("WebSocket authorized")
 				}
 				return nil
 			}
@@ -196,7 +196,7 @@ func (c *TradovateWebSocketClient) handleMessages() {
 			c.mu.Unlock()
 
 			if c.log != nil {
-				c.log.Info("WebSocket session opened")
+				c.log.Debug("WebSocket session opened")
 			}
 
 		case 'h':
@@ -211,7 +211,7 @@ func (c *TradovateWebSocketClient) handleMessages() {
 		case 'c':
 			// Close frame
 			if c.log != nil {
-				c.log.Infof("Server closing connection: %s", string(payload))
+				c.log.Debugf("Server closing connection: %s", string(payload))
 			}
 			return
 
@@ -259,7 +259,7 @@ func (c *TradovateWebSocketClient) handleArrayFrame(payload []byte) {
 			c.isAuthorized = true
 			c.mu.Unlock()
 			if c.log != nil {
-				c.log.Info("Authorization confirmed")
+				c.log.Debug("Authorization confirmed")
 			}
 			continue
 		}
@@ -303,7 +303,7 @@ func (c *TradovateWebSocketClient) handleArrayFrame(payload []byte) {
 func (c *TradovateWebSocketClient) handleResponse(response WSResponse) {
 	if response.Status == 200 {
 		if c.log != nil {
-			c.log.Infof("Request %d successful", response.ID)
+			c.log.Debugf("Request %d successful", response.ID)
 		}
 	} else {
 		if c.log != nil {

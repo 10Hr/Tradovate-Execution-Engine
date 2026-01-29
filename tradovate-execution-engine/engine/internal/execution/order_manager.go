@@ -56,7 +56,7 @@ func (om *OrderManager) Flatten(symbol string, side models.OrderSide, quantity i
 	om.orders[orderID] = order
 	om.Mu.Unlock()
 
-	om.log.Infof("Created market order: %s %s %d %s", orderID, side, quantity, symbol)
+	om.log.Debugf("Created market order: %s %s %d %s", orderID, side, quantity, symbol)
 
 	// Submit order
 	if err := om.submitOrderToExchange(order); err != nil {
@@ -228,7 +228,7 @@ func (om *OrderManager) Reset() {
 	om.orderIDCounter = 0
 	om.Mu.Unlock()
 
-	om.log.Info("Order manager reset")
+	om.log.Debug("Order manager reset")
 }
 
 // FlattenPositions closes all open positions

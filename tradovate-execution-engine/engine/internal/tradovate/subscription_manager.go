@@ -69,7 +69,7 @@ func (s *DataSubscriber) addSubscription(endpoint string, params map[string]inte
 			info.ChartID = chartID
 		}
 		if s.log != nil {
-			s.log.Infof("Incremented ref count for %s to %d", endpoint, info.RefCount)
+			s.log.Debugf("Incremented ref count for %s to %d", endpoint, info.RefCount)
 		}
 	} else {
 		s.subscriptions[key] = &SubscriptionInfo{
@@ -79,7 +79,7 @@ func (s *DataSubscriber) addSubscription(endpoint string, params map[string]inte
 			RefCount: 1,
 		}
 		if s.log != nil {
-			s.log.Infof("Added new subscription: %s with params %v", endpoint, params)
+			s.log.Debugf("Added new subscription: %s with params %v", endpoint, params)
 		}
 	}
 
@@ -109,13 +109,13 @@ func (s *DataSubscriber) removeSubscription(key string) (bool, *SubscriptionInfo
 		}
 		delete(s.subscriptions, key)
 		if s.log != nil {
-			s.log.Infof("Removed subscription: %s", info.Endpoint)
+			s.log.Debugf("Removed subscription: %s", info.Endpoint)
 		}
 		return true, infoCopy
 	}
 
 	if s.log != nil {
-		s.log.Infof("Decremented ref count for %s to %d", info.Endpoint, info.RefCount)
+		s.log.Debugf("Decremented ref count for %s to %d", info.Endpoint, info.RefCount)
 	}
 	return false, info
 }
@@ -129,7 +129,7 @@ func (s *DataSubscriber) HandleEvent(eventType string, data json.RawMessage) {
 		s.handleChartData(data)
 	case marketdata.EventUser:
 		if s.log != nil {
-			s.log.Infof("Event Received: %s", eventType)
+			s.log.Debugf("Event Received: %s", eventType)
 		}
 		if s.OnUserSync != nil {
 			s.OnUserSync(data)
@@ -149,7 +149,7 @@ func (s *DataSubscriber) HandleEvent(eventType string, data json.RawMessage) {
 		s.handleSubscriptionResponse(eventType)
 	default:
 		if s.log != nil {
-			s.log.Infof("Unknown event type: %s", eventType)
+			s.log.Debugf("Unknown event type: %s", eventType)
 		}
 	}
 }
@@ -157,7 +157,7 @@ func (s *DataSubscriber) HandleEvent(eventType string, data json.RawMessage) {
 // handleSubscriptionResponse processes subscription confirmations
 func (s *DataSubscriber) handleSubscriptionResponse(eventType string) {
 	if s.log != nil {
-		s.log.Infof("Confirmation received for: %s", eventType)
+		s.log.Debugf("Confirmation received for: %s", eventType)
 	}
 }
 
@@ -277,7 +277,7 @@ func (s *DataSubscriber) handleChartData(data json.RawMessage) {
 
 	for _, chart := range chartUpdate.Charts {
 		if len(chart.Bars) > 0 && s.log != nil {
-			s.log.Infof("Bar data received - Chart ID: %d, Bars: %d", chart.ID, len(chart.Bars))
+			s.log.Debugf("Bar data received - Chart ID: %d, Bars: %d", chart.ID, len(chart.Bars))
 		}
 	}
 
@@ -312,7 +312,7 @@ func (s *DataSubscriber) SubscribeQuote(symbol interface{}) error {
 	s.addSubscription(endpoint, params, 0)
 
 	if s.log != nil {
-		s.log.Infof("Subscribed to %s for %v", endpoint, symbol)
+		s.log.Debugf("Subscribed to %s for %v", endpoint, symbol)
 	}
 	return nil
 }
@@ -329,7 +329,7 @@ func (s *DataSubscriber) UnsubscribeQuote(symbol interface{}) error {
 	key, exists := s.isSubscribed(subscribeEndpoint, params)
 	if !exists {
 		if s.log != nil {
-			s.log.Infof("Not subscribed to quotes for %v", symbol)
+			s.log.Debugf("Not subscribed to quotes for %v", symbol)
 		}
 		return nil
 	}
@@ -349,7 +349,7 @@ func (s *DataSubscriber) UnsubscribeQuote(symbol interface{}) error {
 	}
 
 	if s.log != nil {
-		s.log.Infof("Unsubscribed from quotes for %v", symbol)
+		s.log.Debugf("Unsubscribed from quotes for %v", symbol)
 	}
 	return nil
 }
@@ -363,7 +363,7 @@ func (s *DataSubscriber) GetChart(params marketdata.HistoricalDataParams) error 
 	}
 
 	if s.log != nil {
-		s.log.Infof("Requested chart data for %v", params.Symbol)
+		s.log.Debugf("Requested chart data for %v", params.Symbol)
 	}
 	return nil
 }
@@ -388,7 +388,7 @@ func (s *DataSubscriber) SubscribeUserSyncRequests(users []int) error {
 	s.addSubscription(endpoint, params, 0)
 
 	if s.log != nil {
-		s.log.Println("Subscribed to user sync requests")
+		s.log.Debug("Subscribed to user sync requests")
 	}
 	return nil
 }
@@ -402,7 +402,7 @@ func (s *DataSubscriber) UnsubscribeAll() error {
 	}
 	s.mu.Unlock()
 
-	s.log.Println("Active Subscription to Disconnect from: ", subscriptions)
+	s.log.Debug("Active Subscription to Disconnect from: ", subscriptions)
 
 	for key, info := range subscriptions {
 		// Force unsubscribe by setting ref count to 1 then removing

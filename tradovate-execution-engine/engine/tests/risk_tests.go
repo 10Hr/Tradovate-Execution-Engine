@@ -17,7 +17,7 @@ func RunRiskTests() {
 }
 
 func testMaxContractsLimit() {
-	log := logger.NewLogger(10)
+	log := logger.NewLogger(10, logger.LevelDebug)
 	cfg := &config.Config{
 		Risk: config.RiskConfig{
 			MaxContracts:     2,
@@ -58,7 +58,7 @@ func testMaxContractsLimit() {
 }
 
 func testDailyLossLimit() {
-	log := logger.NewLogger(10)
+	log := logger.NewLogger(10, logger.LevelDebug)
 	cfg := &config.Config{
 		Risk: config.RiskConfig{
 			MaxContracts:     10, // High limit so it doesn't interfere
@@ -87,7 +87,7 @@ func testDailyLossLimit() {
 }
 
 func testIsDailyLossExceeded() {
-	log := logger.NewLogger(10)
+	log := logger.NewLogger(10, logger.LevelDebug)
 	cfg := &config.Config{
 		Risk: config.RiskConfig{
 			DailyLossLimit: 500,

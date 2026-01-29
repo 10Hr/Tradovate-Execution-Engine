@@ -69,18 +69,18 @@ func (t *PLTracker) PrintSummary() {
 	defer t.mu.RUnlock()
 
 	if t.log != nil {
-		t.log.Info("==================== PnL SUMMARY ====================")
+		t.log.Debug("==================== PnL SUMMARY ====================")
 		for name, entry := range t.entries {
 			direction := "LONG"
 			if entry.NetPos < 0 {
 				direction = "SHORT"
 			}
-			t.log.Infof("%-10s | %5s %3d | Buy: $%8.2f | Last: $%8.2f | PnL: $%9.2f",
+			t.log.Debugf("%-10s | %5s %3d | Buy: $%8.2f | Last: $%8.2f | PnL: $%9.2f",
 				name, direction, models.Abs(entry.NetPos), entry.BuyPrice, entry.LastPrice, entry.PL)
 		}
-		t.log.Info("=====================================================")
-		t.log.Infof("TOTAL PnL: $%.2f", t.GetTotal())
-		t.log.Info("=====================================================")
+		t.log.Debug("=====================================================")
+		t.log.Debugf("TOTAL PnL: $%.2f", t.GetTotal())
+		t.log.Debug("=====================================================")
 	}
 }
 
@@ -158,7 +158,7 @@ func (pt *PortfolioTracker) Start(environment string) error {
 		return fmt.Errorf("failed to subscribe to user sync: %w", err)
 	}
 
-	pt.log.Info("Portfolio tracker started - subscribed to user sync")
+	pt.log.Info("Portfolio tracker started")
 	return nil
 
 }
@@ -180,7 +180,7 @@ func (pt *PortfolioTracker) handlePositionUpdate(data json.RawMessage) {
 	if hasContract {
 
 		if pos.NetPos != 0 {
-			pt.log.Infof("Position update for %s: NetPos=%d, Bought Price=%.2d -> Subscribing",
+			pt.log.Debugf("Position update for %s: NetPos=%d, Bought Price=%.2d -> Subscribing",
 				contractName, pos.NetPos, pos.Bought)
 
 			if err := pt.mdSubsciptionManager.SubscribeQuote(contractName); err != nil {
@@ -203,7 +203,7 @@ func (pt *PortfolioTracker) handleCashBalanceUpdate(data json.RawMessage) {
 		return
 	}
 	pt.plTracker.SetRealizedPnL(cb.RealizedPnL)
-	pt.log.Infof("Cash Balance Update: Realized PnL = %.2f", cb.RealizedPnL)
+	pt.log.Debugf("Cash Balance Update: Realized PnL = %.2f", cb.RealizedPnL)
 }
 
 // handleUserSync processes the initial user sync response
@@ -220,7 +220,7 @@ func (pt *PortfolioTracker) handleUserSync(data json.RawMessage) {
 		return
 	}
 
-	pt.log.Infof("Received sync data: %d positions, %d contracts, %d products, %d cashbalances, %d orders",
+	pt.log.Debugf("Received sync data: %d positions, %d contracts, %d products, %d cashbalances, %d orders",
 		len(syncResp.Positions), len(syncResp.Contracts), len(syncResp.Products), len(syncResp.CashBalances), len(syncResp.Orders))
 
 	pt.mu.Lock()
@@ -261,7 +261,7 @@ func (pt *PortfolioTracker) handleUserSync(data json.RawMessage) {
 
 		if contractName != "" {
 			if pos.NetPos != 0 {
-				pt.log.Infof("Found active position: %s (ID: %d) - NetPos: %d -> Subscribing",
+				pt.log.Debugf("Found active position: %s (ID: %d) - NetPos: %d -> Subscribing",
 					contractName, pos.ContractID, pos.NetPos)
 				// Subscribe to market data
 				pt.mdSubsciptionManager.SubscribeQuote(contractName)

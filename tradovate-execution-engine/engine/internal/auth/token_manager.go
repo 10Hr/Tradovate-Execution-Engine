@@ -258,7 +258,7 @@ func (tm *TokenManager) GetAccountID() (int, error) {
 	tm.mu.Unlock()
 
 	if tm.log != nil {
-		tm.log.Infof("Using Account ID: %d (%s)", accounts[0].ID, accounts[0].Name)
+		tm.log.Debugf("Using Account ID: %d (%s)", accounts[0].ID, accounts[0].Name)
 	}
 
 	return accounts[0].ID, nil
@@ -358,7 +358,7 @@ func (tm *TokenManager) RenewAccessToken() error {
 	// Log success
 	tm.mu.RLock()
 	if tm.log != nil {
-		tm.log.Info("Token renewed successfully")
+		tm.log.Debug("Token renewed successfully")
 	}
 	tm.mu.RUnlock()
 
@@ -390,7 +390,7 @@ func (tm *TokenManager) StartTokenRefreshMonitor(refreshCallback func()) {
 				refreshTime = 1 * time.Second
 			}
 
-			tm.log.Infof("Token refresh scheduled in %v (expires at %v)",
+			tm.log.Debugf("Token refresh scheduled in %v (expires at %v)",
 				refreshTime, tm.expirationTime.Format("3:04 PM"))
 
 			// Wait until refresh time or stop signal
@@ -403,14 +403,14 @@ func (tm *TokenManager) StartTokenRefreshMonitor(refreshCallback func()) {
 			}
 
 			if tm.log != nil {
-				tm.log.Info("Refreshing access tokens...")
+				tm.log.Debug("Refreshing access tokens...")
 			}
 
 			if err := tm.RenewAccessToken(); err != nil {
 				tm.log.Errorf("Failed to renew access token: %v", err)
 			} else {
 				if tm.log != nil {
-					tm.log.Info("Tokens refreshed successfully")
+					tm.log.Debug("Tokens refreshed successfully")
 				}
 
 				// Call the callback to notify that tokens have been refreshed

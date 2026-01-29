@@ -187,8 +187,11 @@ func (m *MACrossover) OnBar(timestamp string, price float64) error {
 	}
 
 	if m.logger != nil {
-		m.logger.Infof("📊 Signal detected at bar %s | Fast: %.2f | Slow: %.2f | New Position: %v",
-			timestamp, m.fastSMA.CurrentValue(), m.slowSMA.CurrentValue(), newPosition)
+		if m.enabled {
+			m.logger.Infof("! Signal detected at bar %s | Fast: %.2f | Slow: %.2f | New Position: %v !",
+				timestamp, m.fastSMA.CurrentValue(), m.slowSMA.CurrentValue(), newPosition)
+		}
+
 	}
 
 	return m.executePositionChange(newPosition)
@@ -199,7 +202,7 @@ func (m *MACrossover) executePositionChange(newPosition Position) error {
 
 	if !m.enabled {
 		if m.logger != nil {
-			m.logger.Info("[Disabled] ")
+			m.logger.Debug("[Disabled] ")
 		}
 		return nil
 	}

@@ -67,7 +67,7 @@ func (rm *RiskManager) CheckOrderRisk(order *models.Order, currentPosition *port
 		}
 	}
 
-	rm.log.Infof("Risk check passed for order: %s %d %s", order.Side, order.Quantity, order.Symbol)
+	rm.log.Debugf("Risk check passed for order: %s %d %s", order.Side, order.Quantity, order.Symbol)
 	return nil
 }
 
@@ -84,7 +84,7 @@ func (rm *RiskManager) UpdatePnL(pnl float64) {
 	defer rm.mu.Unlock()
 
 	rm.dailyPnL += pnl
-	rm.log.Infof("Daily PnL updated: $%.2f (change: $%.2f)", rm.dailyPnL, pnl)
+	rm.log.Debugf("Daily PnL updated: $%.2f (change: $%.2f)", rm.dailyPnL, pnl)
 }
 
 // GetDailyPnL returns the current daily PnL
@@ -106,7 +106,7 @@ func (rm *RiskManager) IncrementTradeCount() {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 	rm.tradeCount++
-	rm.log.Infof("Trade count: %d", rm.tradeCount)
+	rm.log.Debugf("Trade count: %d", rm.tradeCount)
 }
 
 // GetTradeCount returns the daily trade count

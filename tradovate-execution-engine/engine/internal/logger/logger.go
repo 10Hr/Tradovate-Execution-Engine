@@ -13,15 +13,19 @@ const (
 )
 
 // NewLogger creates a new logger with the specified maximum size
-func NewLogger(maxSize int) *Logger {
+func NewLogger(maxSize int, minLevel LogLevel) *Logger {
 	return &Logger{
-		entries: make([]LogEntry, 0),
-		maxSize: maxSize,
+		entries:  make([]LogEntry, 0),
+		maxSize:  maxSize,
+		minLevel: minLevel,
 	}
 }
 
 // log is the internal logging method
 func (l *Logger) log(level LogLevel, format string, args ...interface{}) {
+	if levelPriority[level] < levelPriority[l.minLevel] {
+		return
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -93,6 +97,12 @@ func (l *Logger) Debug(args ...interface{}) {
 // Debugf logs a debug message with formatting
 func (l *Logger) Debugf(format string, args ...interface{}) {
 	l.log(LevelDebug, format, args...)
+}
+
+func (l *Logger) SetLevel(level LogLevel) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.minLevel = level
 }
 
 // GetEntries returns a copy of all log entries

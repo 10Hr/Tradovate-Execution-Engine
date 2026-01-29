@@ -104,9 +104,10 @@ const (
 func InitialModel() model {
 	// Create Loggers
 
-	mainLog := logger.NewLogger(500)
-	orderLog := logger.NewLogger(500)
-	strategyLog := logger.NewLogger(500)
+	logLevel := logger.LevelInfo
+	mainLog := logger.NewLogger(500, logLevel)
+	orderLog := logger.NewLogger(500, logLevel)
+	strategyLog := logger.NewLogger(500, logLevel)
 
 	// Initial log messages
 	mainLog.Println("System initialized")
@@ -1208,31 +1209,31 @@ func (m model) executeCommand() (model, tea.Cmd) {
 		var historicalLoaded bool
 
 		m.marketDataSubscriptionManager.AddChartHandler(func(update marketdata.ChartUpdate) {
-			m.strategyLogger.Infof("CHART UPDATE RECEIVED at %s", time.Now().Format("15:04:05"))
-			m.strategyLogger.Infof("Chart handler called with %d charts", len(update.Charts))
+			m.strategyLogger.Debugf("CHART UPDATE RECEIVED at %s", time.Now().Format("15:04:05"))
+			m.strategyLogger.Debugf("Chart handler called with %d charts", len(update.Charts))
 
 			for _, chart := range update.Charts {
-				m.strategyLogger.Infof("Chart ID: %d | Bars: %d | EOH: %v",
+				m.strategyLogger.Debugf("Chart ID: %d | Bars: %d | EOH: %v",
 					chart.ID, len(chart.Bars), chart.EOH)
 
 				// Check for end of history marker
 				if chart.EOH {
-					m.strategyLogger.Info("End of historical data - now receiving live updates")
+					m.strategyLogger.Debug("End of historical data - now receiving live updates")
 
 					// Enable strategy for live trading
 					if s, ok := m.currentStrategy.Instance.(interface{ SetEnabled(bool) }); ok {
 						s.SetEnabled(true)
 						m.strategyLogger.Info("Strategy enabled for LIVE trading")
-						m.strategyLogger.Info("tdsubs: ", m.tradingClientSubscriptionManager.GetActiveSubscriptions())
-						m.strategyLogger.Info("mdsubs: ", m.marketDataSubscriptionManager.GetActiveSubscriptions())
+						m.strategyLogger.Debug("tdsubs: ", m.tradingClientSubscriptionManager.GetActiveSubscriptions())
+						m.strategyLogger.Debug("mdsubs: ", m.marketDataSubscriptionManager.GetActiveSubscriptions())
 					}
 
 					historicalLoaded = true
 					continue
 				}
 
-				m.strategyLogger.Infof("=== Chart ID: %d ===", chart.ID)
-				m.strategyLogger.Infof("Number of bars: %d", len(chart.Bars))
+				m.strategyLogger.Debugf("=== Chart ID: %d ===", chart.ID)
+				m.strategyLogger.Debugf("Number of bars: %d", len(chart.Bars))
 
 				if !historicalLoaded {
 					// Process each bar
@@ -1255,7 +1256,7 @@ func (m model) executeCommand() (model, tea.Cmd) {
 			}
 		})
 
-		m.strategyLogger.Info("Chart Handler Added")
+		m.strategyLogger.Debug("Chart Handler Added")
 
 		var barAgg = &BarAggregator{firstTick: true}
 
@@ -1313,7 +1314,7 @@ func (m model) executeCommand() (model, tea.Cmd) {
 			}
 		})
 
-		m.strategyLogger.Info("Quote Handler added")
+		m.strategyLogger.Debug("Quote Handler added")
 
 		symbol := m.strategyParams["symbol"]
 		go func() {
@@ -1339,8 +1340,8 @@ func (m model) executeCommand() (model, tea.Cmd) {
 
 			m.currentStrategy.Runtime.SetStatus(StrategyRunning)
 
-			m.strategyLogger.Info("tdsubs: ", m.tradingClientSubscriptionManager.GetActiveSubscriptions())
-			m.strategyLogger.Info("mdsubs: ", m.marketDataSubscriptionManager.GetActiveSubscriptions())
+			m.strategyLogger.Debug("tdsubs: ", m.tradingClientSubscriptionManager.GetActiveSubscriptions())
+			m.strategyLogger.Debug("mdsubs: ", m.marketDataSubscriptionManager.GetActiveSubscriptions())
 		}()
 
 	case "stop":
@@ -1757,7 +1758,6 @@ func (m model) renderOrderManagement(contentHeight int) string {
 	leftPanel.WriteString(fmt.Sprintf("%-22s %s\n", "Unrealized P&L:", unrealizedStyle.Render(fmt.Sprintf("$%.2f", m.unrealizedPnL))))
 	leftPanel.WriteString("\n")
 	leftPanel.WriteString(fmt.Sprintf("%-22s %d\n", "Open Positions:", len(m.positions)))
-	leftPanel.WriteString(fmt.Sprintf("%-22s %d\n", "Total Orders:", len(m.orders)))
 
 	if m.tradingMode == ModeLive {
 		leftPanel.WriteString("\n\n═══ LIVE ACTIONS ═══\n\n")
@@ -2187,7 +2187,7 @@ func (m model) connectCmd() tea.Cmd {
 		if err != nil {
 			return connMsg{err: fmt.Errorf("failed to get access token: %w", err)}
 		}
-		m.mainLogger.Info("Auth token aquired")
+		m.mainLogger.Debug("Auth token aquired")
 
 		tm.SetLogger(m.mainLogger)
 
@@ -2195,7 +2195,7 @@ func (m model) connectCmd() tea.Cmd {
 		if err != nil {
 			return connMsg{err: fmt.Errorf("failed to get MD token: %w", err)}
 		}
-		m.mainLogger.Info("Market data token aquired")
+		m.mainLogger.Debug("Market data token aquired")
 
 		// Create new WebSocket clients
 		marketDataClient = tradovate.NewTradovateWebSocketClient(mdToken, cfg.Tradovate.Environment, "md")
@@ -2215,7 +2215,7 @@ func (m model) connectCmd() tea.Cmd {
 		if err := marketDataSubscriptionManager.Connect(); err != nil {
 			return connMsg{err: fmt.Errorf("Error connecting market data client: %w", err)}
 		}
-		m.mainLogger.Info("Market data WebSocket connected")
+		m.mainLogger.Info("Market Data WebSocket connected")
 
 		if err := tradingClientSubscriptionManager.Connect(); err != nil {
 			return connMsg{err: fmt.Errorf("Error connecting trading client: %w", err)}
@@ -2226,7 +2226,7 @@ func (m model) connectCmd() tea.Cmd {
 		marketDataClient.SetMessageHandler(marketDataSubscriptionManager.HandleEvent)
 		tradingClient.SetMessageHandler(tradingClientSubscriptionManager.HandleEvent)
 
-		m.mainLogger.Info("Message Handlers Set")
+		m.mainLogger.Debug("Message Handlers Set")
 
 		//Set up order status handlers
 		setupOrderHandlers := func() {
@@ -2257,25 +2257,25 @@ func (m model) connectCmd() tea.Cmd {
 
 				switch order.OrdStatus {
 				case "PendingNew":
-					m.orderLogger.Infof("[%s] ORDER PENDING  | ID=%d | %s %s",
+					m.orderLogger.Infof("[%s UTC] ORDER PENDING  | ID=%d | %s %s",
 						ts, order.ID, order.Action, order.OrderType)
 
 				case "Filled":
-					m.orderLogger.Infof("[%s] ORDER FILLED   | ID=%d | %s %s",
+					m.orderLogger.Infof("[%s UTC] ORDER FILLED   | ID=%d | %s %s",
 						ts, order.ID, order.Action, order.OrderType)
 
 				case "Rejected":
-					m.orderLogger.Errorf("[%s] ORDER REJECTED | ID=%d | %s %s",
+					m.orderLogger.Errorf("[%s UTC] ORDER REJECTED | ID=%d | %s %s",
 						ts, order.ID, order.Action, order.OrderType)
 
 				case "Working":
-					m.orderLogger.Infof("[%s] ORDER WORKING  | ID=%d | %s %s",
+					m.orderLogger.Infof("[%s UTC] ORDER WORKING  | ID=%d | %s %s",
 						ts, order.ID, order.Action, order.OrderType)
 				case "Canceled":
-					m.orderLogger.Infof("[%s] ORDER CANCELED | ID=%d | %s %s",
+					m.orderLogger.Infof("[%s UTC] ORDER CANCELED | ID=%d | %s %s",
 						ts, order.ID, order.Action, order.OrderType)
 				default:
-					m.orderLogger.Printf("[%s] UNKNOWN ORDER STATUS | ID=%d | %s %s",
+					m.orderLogger.Warnf("[%s UTC] UNKNOWN ORDER STATUS | ID=%d | %s %s",
 						ts, order.ID, order.Action, order.OrderType)
 				}
 			}
@@ -2283,7 +2283,7 @@ func (m model) connectCmd() tea.Cmd {
 
 		// Set up handlers initially
 		setupOrderHandlers()
-		m.mainLogger.Info("OnOrderUpdate Set")
+		m.mainLogger.Debug("OnOrderUpdate Set")
 
 		userID := tm.GetUserID()
 		tracker := portfolio.NewPortfolioTracker(tradingClientSubscriptionManager, marketDataSubscriptionManager, userID, m.mainLogger)
@@ -2294,10 +2294,8 @@ func (m model) connectCmd() tea.Cmd {
 
 		om.SetPortfolioTracker(tracker)
 
-		m.mainLogger.Info("PortFoliotracker Started")
-
 		tm.StartTokenRefreshMonitor(func() {
-			m.mainLogger.Info("Reconnection complete after token refresh")
+			m.mainLogger.Debug("Reconnection complete after token refresh")
 		})
 
 		return connMsgSuccess{
