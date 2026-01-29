@@ -79,7 +79,10 @@ This guide provides instructions for obtaining:
 ### 1. Run the Application
 
 ```bash
-./trading-engine
+Windows
+trading-engine.exe
+Linux
+./trading-engine.exe
 ```
 
 On first run, the application will:
