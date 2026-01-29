@@ -41,10 +41,10 @@ A terminal-based execution engine built in Go featuring real-time market data, a
 - ✅ Comprehensive logging and export
 
 ### UI Features
-- **Main Tab**: System status, connection info, session P&L
+- **Main Tab**: System status, connection info
 - **Strategy Tab**: Strategy selection, configuration, metrics, logs
 - **Order Management Tab**: Complete order history and status
-- **Positions Tab**: Open positions with live P&L
+- **Positions Tab**: Open positions with live P&L, session P&L
 - **Commands Tab**: Complete command reference
 
 ---
