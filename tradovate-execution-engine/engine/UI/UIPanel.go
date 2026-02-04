@@ -1496,7 +1496,7 @@ func (m model) renderMainHub(contentHeight int) string {
 	}{
 		{"!", connectDesc},
 		{"@", "Select Strategy"},
-		{"#", "Export Main Log"},
+		{"#", "Export Log"},
 		{"$", "Edit Config"},
 		{"%", "Clear Log"},
 	}
