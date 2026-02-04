@@ -145,7 +145,8 @@ Press `Enter` to execute. Press `Esc` to cancel.
 | Shortcut | Action |
 |----------|--------|
 | `Shift + 1` (`!`) | Connect to Tradovate API |
-| `Shift + 2` (`@`) | Open strategy selection (in Strategy tab) |
+| `Shift + 2` (`@`) | Open strategy selection |
+| `Shift + 3` (`#`) | Export Log |
 | `Shift + 4` (`$`) | Open config editor |
 | `1` - `5` | Switch to tab 1-5 |
 | `A` | Previous tab |
@@ -176,9 +177,8 @@ Currently implemented:
 ```
 
 **Method 2: Strategy Selection**
-1. Navigate to Strategy tab (press `2`)
-2. Press `Shift + 2`
-3. Type `ma_crossover`
+1. Press `Shift + 2`
+2. Type `ma_crossover`
 
 ### Configuring Parameters
 
