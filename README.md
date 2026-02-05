@@ -1,7 +1,5 @@
 # Tradovate Execution Engine - User Guide
 
-**Automated Trading System for Tradovate Futures**
-
 A terminal-based execution engine built in Go featuring real-time market data, automated strategy execution, and comprehensive risk management.
 
 ---
