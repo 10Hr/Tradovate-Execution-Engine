@@ -210,7 +210,16 @@ type RiskConfig struct {
 3. Press `Shift + 1` (the `!` key) to connect
 4. Wait for connection confirmation in System Log
 
-**Expected log messages (from `websocket_manager.go` lines 49-62):**
+**Expected info log messages (from `UIPanel.go` lines 408 and 2164-2176):**
+```
+">>> STARTING CONNECTION SEQUENCE... <<<"
+"Config loaded successfully from <filepath>"
+"Attempting Authentication..."
+"Session Start time: <starttime>"
+"Authentication Successful"
+```
+
+**Expected debug log messages (from `websocket_manager.go` lines 49-62):**
 ```
 "Connecting to WebSocket: <url>"
 "WebSocket connected"
