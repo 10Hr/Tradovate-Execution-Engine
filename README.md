@@ -2,6 +2,8 @@
 
 A terminal-based execution engine built in Go featuring real-time market data, automated strategy execution, and comprehensive risk management.
 
+![Execution Engine Main Screen](tradovate-execution-engine/images/main-panel.png)
+
 ---
 
 ## Quick Start
