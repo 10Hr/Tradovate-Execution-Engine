@@ -44,6 +44,7 @@ type Strategy interface {
 	Description() string
 	GetParams() []StrategyParam
 	SetParam(name, value string) error
+	OnBar(timestamp string, price float64) error
 	Init(om *OrderManager) error
 	GetMetrics() map[string]float64
 	Reset()

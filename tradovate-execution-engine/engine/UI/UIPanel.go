@@ -1244,12 +1244,7 @@ func (m model) executeCommand() (model, tea.Cmd) {
 						}
 						lastBar = LastBar{Timestamp: bar.Timestamp, Close: bar.Close}
 
-						// Update Strategy
-						if s, ok := m.currentStrategy.Instance.(interface {
-							OnBar(string, float64) error
-						}); ok {
-							s.OnBar(bar.Timestamp, bar.Close)
-						}
+						s.OnBar(bar.Timestamp, bar.Close)
 
 					}
 				}
@@ -1284,12 +1279,7 @@ func (m model) executeCommand() (model, tea.Cmd) {
 					// Close previous bar if exists
 					if !barAgg.firstTick {
 
-						// Update Strategy
-						if s, ok := m.currentStrategy.Instance.(interface {
-							OnBar(string, float64) error
-						}); ok {
-							s.OnBar(barAgg.currentMinute, barAgg.close)
-						}
+						s.OnBar(barAgg.currentMinute, barAgg.close)
 
 						livebarcounter++
 					}
